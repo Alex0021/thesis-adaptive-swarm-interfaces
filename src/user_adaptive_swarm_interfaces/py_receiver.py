@@ -6,6 +6,7 @@ import data_structures as dts
 import time
 import numpy as np
 from utilities import ConsoleManager
+from queue import Queue
 
 METADATA_BLOCK_NAME = "TobiiUnityMetadata2"
 GAZE_DATA_BLOCK_NAME = "TobiiUnityGazeData2"
@@ -13,51 +14,20 @@ GAZE_DATA_BLOCK_CNT = 100
 
 class PyReceiver:
 
-    class Monitor:
-        def __init__(self):
-            self._last_timestamp: int = 0
-            self._data_rate: float = 0.0
-            self._data_cnt: int = 0
-            self._update_cnt: int = 0
-            self._data_cnt_avg: float = 0.0
-
-        def update(self, packets_received: int):
-            if self._last_timestamp == 0:
-                self.start()
-                return
-            self._data_cnt += packets_received
-            self._update_cnt += 1
-            if time.time() - self._last_timestamp >= 1.0:
-                self._data_rate = self._data_cnt / (time.time() - self._last_timestamp)
-                self._data_cnt_avg = self._data_cnt / self._update_cnt if self._update_cnt > 0 else 0.0
-                self._data_cnt = 0
-                self._update_cnt = 0
-                self._last_timestamp = time.time()
-
-        def start(self):
-            self.reset()
-            self._last_timestamp = time.time()
-
-        def reset(self):
-            self._last_timestamp = 0
-            self._data_rate = 0.0
-            self._data_cnt = 0
-            self._update_cnt = 0
-            self._data_cnt_avg = 0.0
-        def get_data_rate(self) -> float:
-            return self._data_rate
-
-        def get_avg_data_cnt(self) -> float:
-            return self._data_cnt_avg
-
     def __init__(self):
         self._thread: threading.Thread | None = None
+        self._lock: threading.Lock = threading.Lock()
         self._running: bool = False
         self._ready: bool = False
+        
         self._metadata_block: mmap.mmap | None = None
         self._gaze_data_block: mmap.mmap | None = None
         self._gaze_data_ptr: int = 0
-        self._monitor: PyReceiver.Monitor = PyReceiver.Monitor()
+
+        self._listeners: list[Queue[dts.GazeData]] = []
+        """Listeners for gaze data updates. Each listener is a Queue that will receive gaze data dictionaries."""
+
+        self._monitor: Monitor = Monitor()
         self._console: ConsoleManager = ConsoleManager()
 
     def start(self) -> None:
@@ -85,13 +55,13 @@ class PyReceiver:
             self._ready = (metadata["stream_ready"] == 1)
 
             if not self._ready:
-                self._console.update_text("Waiting for stream to be ready...", use_spinner=True)
+                self._console.print("Waiting for stream to be ready...", use_spinner=True)
                 time.sleep(0.1)
                 continue
 
             # Here you can add code to read gaze data if needed
             if metadata["active_data_cnt"] == 0:
-                self._console.update_text("No new gaze data available...", use_spinner=True)
+                self._console.print("No new gaze data available...", use_spinner=True)
                 time.sleep(0.1)
                 continue
 
@@ -101,13 +71,17 @@ class PyReceiver:
 
         while self._running:
             metadata = self.read_metadata_block()
-            if metadata["active_data_cnt"] > 0:
-                gaze_datas = self.read_gaze_data_blocks(metadata["active_data_cnt"])
+            if metadata.active_data_cnt > 0:
+                gaze_datas = self.read_gaze_data_blocks(metadata.active_data_cnt)
+                # Notify listeners
+                with self._lock:
+                    for l in self._listeners:
+                        map(l.put, gaze_datas)
                 self._monitor.update(len(gaze_datas))
                 # reset cnt
-                metadata["active_data_cnt"] = 0
+                metadata.active_data_cnt = 0
                 self.write_metadata_cnt(metadata)
-                self._console.update_text(f"Gaze Data Rate: {self._monitor.get_data_rate():.2f} Hz | Avg Data Count: {self._monitor.get_avg_data_cnt():.2f}", use_spinner=True)
+                self._console.print(f"Gaze Data Rate: {self._monitor.get_data_rate():.2f} Hz | Avg Data Count: {self._monitor.get_avg_data_cnt():.2f}", use_spinner=True)
                 #self.pretty_print_gaze_data(gaze_datas[-1])  # Print the latest gaze data
 
         self._monitor.reset()
@@ -126,44 +100,31 @@ class PyReceiver:
         shm = mmap.mmap(-1, block_size, tagname=block_name, access=access)
         return shm
     
-    def read_metadata_block(self) -> dict[str, int]:
+    def read_metadata_block(self) -> dts.Metadata:
         """
         Read the metadata block from shared memory.
 
         Returns:
-            dict[str, int]: A dictionary containing the metadata fields and their values.
+            dts.Metadata: An instance of the Metadata dataclass containing the metadata fields and their values.
         """
-        metadata: dict[str, int] = {}
         self._metadata_block.seek(0)
-        data = struct.unpack('BBB', self._metadata_block.read(sum(dts.sm_metadata.values())))
-        metadata["stream_ready"] = data[0]
-        metadata["calibration_ok"] = data[1]
-        metadata["active_data_cnt"] = data[2]
-        return metadata
+        data = self._metadata_block.read(dts.Metadata().size())
+        return dts.Metadata.from_buffer(data)
     
-    def read_gaze_data_blocks(self, count: int = 1) -> list[dict[str, float]]:
+    def read_gaze_data_blocks(self, count: int = 1) -> list[dts.GazeData]:
         """
         Read gaze data blocks from shared memory.
 
         Returns:
-            list[dict[str, Any]]: A list of dictionaries containing the gaze data fields and their values.
+            list[dts.GazeData]: A list of GazeData dataclass instances containing the gaze data fields and their values.
         """
-        gaze_datas: list[dict[str, Any]] = []
-        block_size = sum(dts.sm_gaze_data.values())
+        gaze_datas: list[dts.GazeData] = []
+        block_size = dts.GazeData().size()
 
         for _ in range(count):
             self._gaze_data_block.seek(self._gaze_data_ptr)
-            data = struct.unpack('<q10f2B2f', self._gaze_data_block.read(block_size))
-            gaze_data: dict[str, Any] = {}
-            gaze_data["timestamp"] = data[0]
-            gaze_data["left_gaze_point"] = np.array([data[1], data[2], data[3]], dtype=np.float32)
-            gaze_data["right_gaze_point"] = np.array([data[4], data[5], data[6]], dtype=np.float32)
-            gaze_data["left_point_screen"] = np.array([data[7], data[8]], dtype=np.float32)
-            gaze_data["right_point_screen"] = np.array([data[9], data[10]], dtype=np.float32)
-            gaze_data["left_validity"] = data[11]
-            gaze_data["right_validity"] = data[12]
-            gaze_data["left_pupil_diameter"] = np.float32(data[13])
-            gaze_data["right_pupil_diameter"] = np.float32(data[14])
+            data = self._gaze_data_block.read(block_size)
+            gaze_data = dts.GazeData.from_buffer(data)
             gaze_datas.append(gaze_data)
 
             self._gaze_data_ptr += block_size
@@ -173,14 +134,12 @@ class PyReceiver:
 
         return gaze_datas
     
-    def write_metadata_cnt(self, metadata: dict[str, int]) -> None:
+    def write_metadata_cnt(self, metadata: dts.Metadata) -> None:
         """
         Write the updated active_data_cnt back to the metadata block.
         """
-        if not "active_data_cnt" in metadata:
-            return
         self._metadata_block.seek(2)  # Offset for active_data_cnt
-        self._metadata_block.write(struct.pack('B', metadata["active_data_cnt"]))
+        self._metadata_block.write(metadata.active_data_cnt.tobytes())
         self._metadata_block.flush()
 
     def pretty_print_gaze_data(self, gaze_data: dict[str, Any]) -> None:
@@ -190,7 +149,56 @@ class PyReceiver:
         print('\r--------------' + ' '*20)
         for key, value in gaze_data.items():
             print(f"  {key}: {value}")
+
+    def register_listener(self, listener: Queue[dict[str, Any]]) -> None:
+        """
+        Register a listener to receive gaze data updates.
+
+        Args:
+            listener (Queue[dict[str, Any]]): A queue to receive gaze data dictionaries.
+        """
+        if self._running:
+            with self._lock:
+                self._listeners.append(listener)
     
+class Monitor:
+    def __init__(self):
+        self._last_timestamp: int = 0
+        self._data_rate: float = 0.0
+        self._data_cnt: int = 0
+        self._update_cnt: int = 0
+        self._data_cnt_avg: float = 0.0
+
+    def update(self, packets_received: int):
+        if self._last_timestamp == 0:
+            self.start()
+            return
+        self._data_cnt += packets_received
+        self._update_cnt += 1
+        if time.time() - self._last_timestamp >= 1.0:
+            self._data_rate = self._data_cnt / (time.time() - self._last_timestamp)
+            self._data_cnt_avg = self._data_cnt / self._update_cnt if self._update_cnt > 0 else 0.0
+            self._data_cnt = 0
+            self._update_cnt = 0
+            self._last_timestamp = time.time()
+
+    def start(self):
+        self.reset()
+        self._last_timestamp = time.time()
+
+    def reset(self):
+        self._last_timestamp = 0
+        self._data_rate = 0.0
+        self._data_cnt = 0
+        self._update_cnt = 0
+        self._data_cnt_avg = 0.0
+
+    def get_data_rate(self) -> float:
+        return self._data_rate
+
+    def get_avg_data_cnt(self) -> float:
+        return self._data_cnt_avg
+
 
 if __name__ == "__main__":
     receiver = PyReceiver()

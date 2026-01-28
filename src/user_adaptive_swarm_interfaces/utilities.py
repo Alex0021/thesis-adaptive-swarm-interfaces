@@ -29,15 +29,7 @@ class ConsoleManager:
         sys.stdout.write("\r" + " " * 120 + "\r")
         sys.stdout.flush()
 
-    def new_text(self, text: str, use_spinner: Optional[bool] = None) -> None:
-        with self._lock:
-            sys.stdout.write(text + "\n")
-            sys.stdout.flush()
-            self._text = ""
-            if use_spinner is not None:
-                self._use_spinner = use_spinner
-
-    def update_text(self, text: str, use_spinner: Optional[bool] = None) -> None:
+    def print(self, text: str, use_spinner: Optional[bool] = None) -> None:
         if text == self._text and use_spinner == self._use_spinner:
             return
         with self._lock:
