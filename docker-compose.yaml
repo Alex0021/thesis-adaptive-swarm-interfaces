@@ -1,0 +1,10 @@
+services:
+  workload_models:
+    container_name: workload_models_service
+    build:
+      context: ./services/workload_models
+      dockerfile: dockerfile
+    volumes:
+      - ./services/workload_models:/app
+    environment:
+      - PYTHONUNBUFFERED=1

@@ -1,0 +1,25 @@
+[project]
+name = "eye-tracker"
+version = "0.1.0"
+description = "Eye tracker data stream and calibration for Tobii fusion pro device"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "tobii_research",
+    "numpy",
+    "pyzmq"
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+    "mypy"
+]
+
+[project.scripts]
+eye_tracker = "eye_tracker.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
