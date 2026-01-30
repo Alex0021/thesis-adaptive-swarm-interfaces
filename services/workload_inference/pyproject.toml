@@ -9,7 +9,8 @@ dependencies = [
     "pandas",
     "matplotlib",
     "numpy",
-    "debugpy"
+    "debugpy",
+    "PyYaml"
 ]
 
 [dependency-groups]
@@ -17,10 +18,52 @@ dev = [
     "pytest",
     "black",
     "mypy",
+    "ruff"
 ]
 
 [project.scripts]
 workload_inference = "workload_inference.main:main"
+
+[tool.black]
+line_length = 88
+
+[tool.mypy]
+python_version = "3.14"
+disable_error_code = ["import-untyped"]
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+line-length = 88
+indent-width = 4
+target-version = "py314"
 
 [build-system]
 requires = ["setuptools>=61"]

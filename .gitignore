@@ -25,5 +25,5 @@ Thumbs.db
 htmlcov/
 
 build/
-
+data/
 local/

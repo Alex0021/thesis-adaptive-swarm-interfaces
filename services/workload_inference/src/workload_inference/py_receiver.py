@@ -2,15 +2,18 @@ import struct
 import threading
 import mmap
 from typing import Any
-import services.workload_inference.src.workload_inference.data_structures as dts
+import workload_inference.data_structures as dts
 import time
 import numpy as np
-from utilities import ConsoleManager
+from workload_inference.utilities import ConsoleManager
 from queue import Queue
+from typing import Callable
 
 METADATA_BLOCK_NAME = "TobiiUnityMetadata2"
 GAZE_DATA_BLOCK_NAME = "TobiiUnityGazeData2"
 GAZE_DATA_BLOCK_CNT = 100
+
+type Listener = Callable[[list[dts.GazeData]], None]
 
 class PyReceiver:
 
@@ -24,8 +27,8 @@ class PyReceiver:
         self._gaze_data_block: mmap.mmap | None = None
         self._gaze_data_ptr: int = 0
 
-        self._listeners: list[Queue[dts.GazeData]] = []
-        """Listeners for gaze data updates. Each listener is a Queue that will receive gaze data dictionaries."""
+        self._listeners: list[Listener] = []
+        """Listeners for gaze data updates. Each listener is a callable function that takes a list of GazeData instances as an argument."""
 
         self._monitor: Monitor = Monitor()
         self._console: ConsoleManager = ConsoleManager()
@@ -34,6 +37,9 @@ class PyReceiver:
         # Acquire shared memory blocks
         self._metadata_block = self.acquire_shm(METADATA_BLOCK_NAME, dts.Metadata.size(), access=mmap.ACCESS_WRITE)
         self._gaze_data_block = self.acquire_shm(GAZE_DATA_BLOCK_NAME, dts.GazeData.size() * GAZE_DATA_BLOCK_CNT, access=mmap.ACCESS_READ)
+
+        if self._metadata_block is None or self._gaze_data_block is None:
+            raise RuntimeError("Failed to acquire shared memory blocks.")
 
         self._console.start()
         # Start main thread
@@ -72,17 +78,20 @@ class PyReceiver:
         while self._running:
             metadata = self.read_metadata_block()
             if metadata.active_data_cnt > 0:
-                gaze_datas = self.read_gaze_data_blocks(metadata.active_data_cnt)
+                gaze_datas = self.read_gaze_data_blocks(int(metadata.active_data_cnt))
                 # Notify listeners
                 with self._lock:
-                    for l in self._listeners:
-                        map(l.put, gaze_datas)
+                    for listener in self._listeners:
+                        listener(gaze_datas)
+                # Update monitor
                 self._monitor.update(len(gaze_datas))
                 # reset cnt
-                metadata.active_data_cnt = 0
+                metadata.active_data_cnt = np.uint8(0)
                 self.write_metadata_cnt(metadata)
-                self._console.print(f"Gaze Data Rate: {self._monitor.get_data_rate():.2f} Hz | Avg Data Count: {self._monitor.get_avg_data_cnt():.2f}", use_spinner=True)
-                self.pretty_print_gaze_data(gaze_datas[-1])  # Print the latest gaze data
+                self._console.print(f"Gaze Data Rate: {self._monitor.get_data_rate():.1f} Hz"
+                                    f" | Avg Data Count: {self._monitor.get_avg_data_cnt():.1f}"
+                                    f" | Total: {self._monitor.get_total_packets()}     ", use_spinner=True)
+                # self.pretty_print_gaze_data(gaze_datas[-1])  # Print the latest gaze data
 
         self._monitor.reset()
     
@@ -107,6 +116,7 @@ class PyReceiver:
         Returns:
             dts.Metadata: An instance of the Metadata dataclass containing the metadata fields and their values.
         """
+        assert self._metadata_block is not None, "Metadata block is not initialized."
         self._metadata_block.seek(0)
         data = self._metadata_block.read(dts.Metadata.size())
         return dts.Metadata.from_buffer(data)
@@ -120,6 +130,8 @@ class PyReceiver:
         """
         gaze_datas: list[dts.GazeData] = []
         block_size = dts.GazeData.size()
+
+        assert self._gaze_data_block is not None, "Gaze data block is not initialized."
 
         for _ in range(count):
             self._gaze_data_block.seek(self._gaze_data_ptr)
@@ -138,8 +150,9 @@ class PyReceiver:
         """
         Write the updated active_data_cnt back to the metadata block.
         """
+        assert self._metadata_block is not None, "Metadata block is not initialized."
         self._metadata_block.seek(2)  # Offset for active_data_cnt
-        self._metadata_block.write(metadata.active_data_cnt.to_bytes(1, byteorder='little'))
+        self._metadata_block.write(metadata.active_data_cnt.tobytes())
         self._metadata_block.flush()
 
     def pretty_print_gaze_data(self, gaze_data: dts.GazeData) -> None:
@@ -150,24 +163,24 @@ class PyReceiver:
         for key, value in gaze_data.__dict__.items():
             print(f"  {key}: {value}")
 
-    def register_listener(self, listener: Queue[dict[str, Any]]) -> None:
+    def register_listener(self, listener: Callable[[list[dts.GazeData]], None]) -> None:
         """
         Register a listener to receive gaze data updates.
 
         Args:
-            listener (Queue[dict[str, Any]]): A queue to receive gaze data dictionaries.
+            listener (Callable[[list[dts.GazeData]], None]): A callable to receive a list of GazeData instances.
         """
-        if self._running:
-            with self._lock:
-                self._listeners.append(listener)
+        with self._lock:
+            self._listeners.append(listener)
     
 class Monitor:
     def __init__(self):
-        self._last_timestamp: int = 0
+        self._last_timestamp: float = 0.0
         self._data_rate: float = 0.0
         self._data_cnt: int = 0
         self._update_cnt: int = 0
         self._data_cnt_avg: float = 0.0
+        self.total_packets: int = 0
 
     def update(self, packets_received: int):
         if self._last_timestamp == 0:
@@ -175,6 +188,7 @@ class Monitor:
             return
         self._data_cnt += packets_received
         self._update_cnt += 1
+        self.total_packets += packets_received
         if time.time() - self._last_timestamp >= 1.0:
             self._data_rate = self._data_cnt / (time.time() - self._last_timestamp)
             self._data_cnt_avg = self._data_cnt / self._update_cnt if self._update_cnt > 0 else 0.0
@@ -187,7 +201,7 @@ class Monitor:
         self._last_timestamp = time.time()
 
     def reset(self):
-        self._last_timestamp = 0
+        self._last_timestamp = 0.0
         self._data_rate = 0.0
         self._data_cnt = 0
         self._update_cnt = 0
@@ -198,6 +212,9 @@ class Monitor:
 
     def get_avg_data_cnt(self) -> float:
         return self._data_cnt_avg
+
+    def get_total_packets(self) -> int:
+        return self.total_packets
 
 
 if __name__ == "__main__":
