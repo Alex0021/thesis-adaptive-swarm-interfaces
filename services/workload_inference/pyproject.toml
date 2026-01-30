@@ -1,5 +1,5 @@
 [project]
-name = "workload-models"
+name = "workload-inference"
 version="0.1.0"
 requires-python = ">=3.12"
 
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-workload_model = "workload_models.main:main"
+workload_inference = "workload_inference.main:main"
 
 [build-system]
 requires = ["setuptools>=61"]

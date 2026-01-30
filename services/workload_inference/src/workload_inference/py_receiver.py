@@ -2,7 +2,7 @@ import struct
 import threading
 import mmap
 from typing import Any
-import data_structures as dts
+import services.workload_inference.src.workload_inference.data_structures as dts
 import time
 import numpy as np
 from utilities import ConsoleManager

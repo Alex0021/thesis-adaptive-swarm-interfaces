@@ -1,11 +1,11 @@
 services:
-  workload_models:
-    container_name: workload_models_service
+  workload_inference:
+    container_name: workload_inference_service
     build:
-      context: ./services/workload_models
+      context: ./services/workload_inference
       dockerfile: dockerfile
     volumes:
-      - ./services/workload_models:/app
+      - ./services/workload_inference:/app
     ports:
       - 5555:5555
       - 5678:5678
