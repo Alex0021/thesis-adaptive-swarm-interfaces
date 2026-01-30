@@ -15,23 +15,61 @@ GAZE_DATA_BLOCK_CNT = 100
 
 type Listener = Callable[[list[dts.GazeData]], None]
 
-class PyReceiver:
-
+class PyReceiverBase:
     def __init__(self):
         self._thread: threading.Thread | None = None
         self._lock: threading.Lock = threading.Lock()
         self._running: bool = False
         self._ready: bool = False
-        
-        self._metadata_block: mmap.mmap | None = None
-        self._gaze_data_block: mmap.mmap | None = None
-        self._gaze_data_ptr: int = 0
 
         self._listeners: list[Listener] = []
         """Listeners for gaze data updates. Each listener is a callable function that takes a list of GazeData instances as an argument."""
-
+        
         self._monitor: Monitor = Monitor()
         self._console: ConsoleManager = ConsoleManager()
+    
+    def start(self) -> None:
+        raise NotImplementedError()
+
+    def stop(self) -> None:
+        raise NotImplementedError()
+
+    def register_listener(self, listener: Callable[[list[dts.GazeData]], None]) -> None:
+        """
+        Register a listener to receive gaze data updates.
+
+        Args:
+            listener (Callable[[list[dts.GazeData]], None]): A callable to receive a list of GazeData instances.
+        """
+        with self._lock:
+            self._listeners.append(listener)
+        
+    def clear_listeners(self) -> None:
+        """
+        Clear all registered listeners.
+        """
+        with self._lock:
+            self._listeners.clear()
+
+    def pretty_print_gaze_data(self, gaze_data: dts.GazeData) -> None:
+        """
+        Pretty print the gaze data.
+        """
+        print('\r--------------' + ' '*20)
+        for key, value in gaze_data.__dict__.items():
+            print(f"  {key}: {value}")
+
+
+class SMReceiver(PyReceiverBase):
+    """
+    Shared Memory Receiver for Gaze Data.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._metadata_block: mmap.mmap | None = None
+        self._gaze_data_block: mmap.mmap | None = None
+        self._gaze_data_ptr: int = 0
 
     def start(self) -> None:
         # Acquire shared memory blocks
@@ -155,23 +193,21 @@ class PyReceiver:
         self._metadata_block.write(metadata.active_data_cnt.tobytes())
         self._metadata_block.flush()
 
-    def pretty_print_gaze_data(self, gaze_data: dts.GazeData) -> None:
-        """
-        Pretty print the gaze data.
-        """
-        print('\r--------------' + ' '*20)
-        for key, value in gaze_data.__dict__.items():
-            print(f"  {key}: {value}")
 
-    def register_listener(self, listener: Callable[[list[dts.GazeData]], None]) -> None:
-        """
-        Register a listener to receive gaze data updates.
+class ZMQReceiver(PyReceiverBase):
+    """
+    ZeroMQ Receiver for Gaze Data using pub/sub socket architecture.
+    """
+    def __init__(self):
+        super().__init__()
+        pass
 
-        Args:
-            listener (Callable[[list[dts.GazeData]], None]): A callable to receive a list of GazeData instances.
-        """
-        with self._lock:
-            self._listeners.append(listener)
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
     
 class Monitor:
     def __init__(self):
