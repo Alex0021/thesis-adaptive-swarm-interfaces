@@ -32,8 +32,8 @@ class PyReceiver:
 
     def start(self) -> None:
         # Acquire shared memory blocks
-        self._metadata_block = self.acquire_shm(METADATA_BLOCK_NAME, sum(dts.sm_metadata.values()))
-        self._gaze_data_block = self.acquire_shm(GAZE_DATA_BLOCK_NAME, sum(dts.sm_gaze_data.values()) * GAZE_DATA_BLOCK_CNT, access=mmap.ACCESS_READ)
+        self._metadata_block = self.acquire_shm(METADATA_BLOCK_NAME, dts.Metadata.size(), access=mmap.ACCESS_WRITE)
+        self._gaze_data_block = self.acquire_shm(GAZE_DATA_BLOCK_NAME, dts.GazeData.size() * GAZE_DATA_BLOCK_CNT, access=mmap.ACCESS_READ)
 
         self._console.start()
         # Start main thread
@@ -52,7 +52,7 @@ class PyReceiver:
         while self._running:
             # Check the stream_ready flag in metadata
             metadata = self.read_metadata_block()
-            self._ready = (metadata["stream_ready"] == 1)
+            self._ready = (metadata.stream_ready == 1)
 
             if not self._ready:
                 self._console.print("Waiting for stream to be ready...", use_spinner=True)
@@ -60,7 +60,7 @@ class PyReceiver:
                 continue
 
             # Here you can add code to read gaze data if needed
-            if metadata["active_data_cnt"] == 0:
+            if metadata.active_data_cnt == 0:
                 self._console.print("No new gaze data available...", use_spinner=True)
                 time.sleep(0.1)
                 continue
@@ -82,7 +82,7 @@ class PyReceiver:
                 metadata.active_data_cnt = 0
                 self.write_metadata_cnt(metadata)
                 self._console.print(f"Gaze Data Rate: {self._monitor.get_data_rate():.2f} Hz | Avg Data Count: {self._monitor.get_avg_data_cnt():.2f}", use_spinner=True)
-                #self.pretty_print_gaze_data(gaze_datas[-1])  # Print the latest gaze data
+                self.pretty_print_gaze_data(gaze_datas[-1])  # Print the latest gaze data
 
         self._monitor.reset()
     
@@ -108,7 +108,7 @@ class PyReceiver:
             dts.Metadata: An instance of the Metadata dataclass containing the metadata fields and their values.
         """
         self._metadata_block.seek(0)
-        data = self._metadata_block.read(dts.Metadata().size())
+        data = self._metadata_block.read(dts.Metadata.size())
         return dts.Metadata.from_buffer(data)
     
     def read_gaze_data_blocks(self, count: int = 1) -> list[dts.GazeData]:
@@ -119,7 +119,7 @@ class PyReceiver:
             list[dts.GazeData]: A list of GazeData dataclass instances containing the gaze data fields and their values.
         """
         gaze_datas: list[dts.GazeData] = []
-        block_size = dts.GazeData().size()
+        block_size = dts.GazeData.size()
 
         for _ in range(count):
             self._gaze_data_block.seek(self._gaze_data_ptr)
@@ -139,15 +139,15 @@ class PyReceiver:
         Write the updated active_data_cnt back to the metadata block.
         """
         self._metadata_block.seek(2)  # Offset for active_data_cnt
-        self._metadata_block.write(metadata.active_data_cnt.tobytes())
+        self._metadata_block.write(metadata.active_data_cnt.to_bytes(1, byteorder='little'))
         self._metadata_block.flush()
 
-    def pretty_print_gaze_data(self, gaze_data: dict[str, Any]) -> None:
+    def pretty_print_gaze_data(self, gaze_data: dts.GazeData) -> None:
         """
         Pretty print the gaze data.
         """
         print('\r--------------' + ' '*20)
-        for key, value in gaze_data.items():
+        for key, value in gaze_data.__dict__.items():
             print(f"  {key}: {value}")
 
     def register_listener(self, listener: Queue[dict[str, Any]]) -> None:

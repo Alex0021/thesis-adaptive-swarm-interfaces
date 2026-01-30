@@ -3,20 +3,22 @@ import numpy as np
 
 @dataclass 
 class Metadata:
-    stream_ready: np.uint8
-    calibration_ok: np.uint8
-    active_data_cnt: np.uint8
+    stream_ready: np.uint8 = 0
+    calibration_ok: np.uint8 = 0
+    active_data_cnt: np.uint8 = 0
 
     def get_conversion_str(self) -> str:
         return 'BBB'
-    
-    def size(self) -> int:
-        return 1 + 1 + 1
-    
+
     def __len__(self) -> int:
         return self.size()
+
+    @classmethod
+    def size(cls) -> int:
+        return 1 + 1 + 1
     
-    def from_buffer(buffer: bytes) -> "Metadata":
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> "Metadata":
         return Metadata(
             stream_ready = np.frombuffer(buffer[0:1], dtype=np.uint8)[0],
             calibration_ok = np.frombuffer(buffer[1:2], dtype=np.uint8)[0],
@@ -37,14 +39,16 @@ class GazeData:
 
     def get_conversion_str(self) -> str:
         return '<q10f2B2f'
-    
-    def size(self) -> int:
-        return 8 + 3*4 + 3*4 + 2*4 + 2*4 + 1 + 1 + 4 + 4
-    
+
     def __len__(self) -> int:
         return self.size()
 
-    def from_buffer(buffer: bytes) -> "GazeData":
+    @classmethod
+    def size(cls) -> int:
+        return 8 + 3*4 + 3*4 + 2*4 + 2*4 + 1 + 1 + 4 + 4
+
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> "GazeData":
         return GazeData(
             timestamp = np.frombuffer(buffer[0:8], dtype=np.int64)[0],
             left_gaze_point = np.frombuffer(buffer[8:20], dtype=np.float32),
