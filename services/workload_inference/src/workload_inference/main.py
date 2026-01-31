@@ -1,7 +1,7 @@
 import time
 import debugpy
 import os
-from workload_inference.py_receiver import SMReceiver
+from workload_inference.py_receiver import ZMQReceiver
 import zmq
 from workload_inference.experiment import ExperimentManager
 from workload_inference.processing import DataProcessor
@@ -25,7 +25,7 @@ def main():
     try:
         experiment_manager = ExperimentManager()
         data_processor = DataProcessor()
-        receiver = SMReceiver()
+        receiver = ZMQReceiver()
         receiver.register_listener(experiment_manager.datas_callback)
         receiver.register_listener(data_processor.datas_callback)
         receiver.start()

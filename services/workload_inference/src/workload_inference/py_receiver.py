@@ -1,12 +1,12 @@
-import struct
+from workload_inference.utilities import ConsoleManager
 import threading
 import mmap
 from typing import Any
 import workload_inference.data_structures as dts
 import time
 import numpy as np
-from workload_inference.utilities import ConsoleManager
-from queue import Queue
+import logging
+import zmq
 from typing import Callable
 
 METADATA_BLOCK_NAME = "TobiiUnityMetadata2"
@@ -16,6 +16,10 @@ GAZE_DATA_BLOCK_CNT = 100
 type Listener = Callable[[list[dts.GazeData]], None]
 
 class PyReceiverBase:
+    """
+    Base class for Gaze Data Receivers.
+    """
+
     def __init__(self):
         self._thread: threading.Thread | None = None
         self._lock: threading.Lock = threading.Lock()
@@ -27,6 +31,8 @@ class PyReceiverBase:
         
         self._monitor: Monitor = Monitor()
         self._console: ConsoleManager = ConsoleManager()
+
+        self._logger = logging.getLogger("PyReceiverBase")
     
     def start(self) -> None:
         raise NotImplementedError()
@@ -70,6 +76,7 @@ class SMReceiver(PyReceiverBase):
         self._metadata_block: mmap.mmap | None = None
         self._gaze_data_block: mmap.mmap | None = None
         self._gaze_data_ptr: int = 0
+        self._logger.info("SMReceiver initialized.")
 
     def start(self) -> None:
         # Acquire shared memory blocks
@@ -78,6 +85,8 @@ class SMReceiver(PyReceiverBase):
 
         if self._metadata_block is None or self._gaze_data_block is None:
             raise RuntimeError("Failed to acquire shared memory blocks.")
+
+        self._logger.info("Metadata (%s) and Gaze Data (%s) blocks acquired.", METADATA_BLOCK_NAME, GAZE_DATA_BLOCK_NAME)
 
         self._console.start()
         # Start main thread
@@ -198,16 +207,48 @@ class ZMQReceiver(PyReceiverBase):
     """
     ZeroMQ Receiver for Gaze Data using pub/sub socket architecture.
     """
-    def __init__(self):
+    SOCKET_SUB_FILTER = ""
+
+    def __init__(self, address: str = "tcp://localhost:5555"):
         super().__init__()
-        pass
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt_string(zmq.SUBSCRIBE, self.SOCKET_SUB_FILTER)
+        self._socket.connect(address)
+        self._logger.info("ZMQReceiver initialized.")
 
     def start(self) -> None:
-        pass
+        if not self._running:
+            self._running = True
+            self._thread = threading.Thread(target=self._run)
+            self._thread.start()
+            self._monitor.start()
+            self._logger.info("ZMQReceiver started and connected to %s", self._socket.getsockopt_string(zmq.LAST_ENDPOINT))
 
     def stop(self) -> None:
-        pass
+        if self._thread is not None:
+            self._running = False
+            self._thread.join()
+            self._thread = None
+            self._logger.info("ZMQReceiver stopped.")
 
+    def _run(self) -> None:
+        while self._running:
+            try:
+                message = self._socket.recv_json(flags=zmq.NOBLOCK)
+                gaze_data = dts.GazeData(**message)
+                # Notify listeners
+                with self._lock:
+                    for listener in self._listeners:
+                        listener([gaze_data])
+                # Update monitor
+                self._monitor.update(1)
+                self._console.print(f"Gaze Data Rate: {self._monitor.get_data_rate():.1f} Hz"
+                                    f" | Avg Data Count: {self._monitor.get_avg_data_cnt():.1f}"
+                                    f" | Total: {self._monitor.get_total_packets()}     ", use_spinner=True)
+                # self.pretty_print_gaze_data(gaze_data)  # Print the latest gaze data
+            except zmq.Again:
+                time.sleep(0.01)  # No message received, wait a bit
     
 class Monitor:
     def __init__(self):
@@ -251,13 +292,3 @@ class Monitor:
 
     def get_total_packets(self) -> int:
         return self.total_packets
-
-
-if __name__ == "__main__":
-    receiver = PyReceiver()
-    receiver.start()
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        receiver.stop()
