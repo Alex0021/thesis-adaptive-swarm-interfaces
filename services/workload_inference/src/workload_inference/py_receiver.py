@@ -236,7 +236,7 @@ class ZMQReceiver(PyReceiverBase):
         while self._running:
             try:
                 message = self._socket.recv_json(flags=zmq.NOBLOCK)
-                gaze_data = dts.GazeData(**message)
+                gaze_data = dts.GazeData.from_dict(message)
                 # Notify listeners
                 with self._lock:
                     for listener in self._listeners:

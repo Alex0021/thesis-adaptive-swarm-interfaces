@@ -72,3 +72,26 @@ class GazeData:
             left_pupil_diameter = np.frombuffer(buffer[50:54], dtype=np.float32)[0],
             right_pupil_diameter = np.frombuffer(buffer[54:58], dtype=np.float32)[0],
         )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GazeData":
+        try:
+            return GazeData(
+                timestamp = np.int64(data['system_time_stamp']),
+                left_gaze_point_x = np.float32(data['left_gaze_origin_in_user_coordinate_system'][0]),
+                left_gaze_point_y = np.float32(data['left_gaze_origin_in_user_coordinate_system'][1]),
+                left_gaze_point_z = np.float32(data['left_gaze_origin_in_user_coordinate_system'][2]),
+                right_gaze_point_x = np.float32(data['right_gaze_origin_in_user_coordinate_system'][0]),
+                right_gaze_point_y = np.float32(data['right_gaze_origin_in_user_coordinate_system'][1]),
+                right_gaze_point_z = np.float32(data['right_gaze_origin_in_user_coordinate_system'][2]),
+                left_point_screen_x = np.float32(data['left_gaze_point_on_display_area'][0]),
+                left_point_screen_y = np.float32(data['left_gaze_point_on_display_area'][1]),
+                right_point_screen_x = np.float32(data['right_gaze_point_on_display_area'][0]),
+                right_point_screen_y = np.float32(data['right_gaze_point_on_display_area'][1]),
+                left_validity = np.int8(data['left_pupil_validity']),
+                right_validity = np.int8(data['right_pupil_validity']),
+                left_pupil_diameter = np.float32(data['left_pupil_diameter']),
+                right_pupil_diameter = np.float32(data['right_pupil_diameter']),
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing key in data dictionary: {e}")
