@@ -45,14 +45,12 @@ def main():
         #         pass
         #     time.sleep(1)
         visualizer.showMaximized()
-        visualizer.set_update_loop_state(True)
         app.exec()
     except KeyboardInterrupt:
         pass
     finally:
         receiver.stop()
         experiment_manager.stop_recording()
-        visualizer.set_update_loop_state(False)
 
     logger.info("Workload Inference Service Stopped")
 

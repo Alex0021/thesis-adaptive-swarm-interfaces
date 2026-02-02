@@ -1,17 +1,12 @@
 import time
 from PyQt6.QtWidgets import QMainWindow
+from PyQt6.QtCore import QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
 from collections import deque
 from workload_inference.data_structures import GazeData
-import threading
-from PyQt6.QtCore import pyqtSignal, QObject
 
-
-class UpdateSignalEmitter(QObject):
-    """Emits signals from background thread to update UI"""
-    update_signal = pyqtSignal()
 
 class GazeDataCanvas(FigureCanvas):
     """Matplotlib canvas with 3 subplots for gaze visualization"""
@@ -28,17 +23,9 @@ class GazeDataCanvas(FigureCanvas):
 
         # Initalize 3 plots
         ar = self.screen_height / self.screen_width
-        self.ax_gaze = self.fig.add_subplot(5, 2, (1, 6), aspect=ar, adjustable='box')
-        self.ax_left_validity = self.fig.add_subplot(5, 2, 7)
-        self.ax_right_validity = self.fig.add_subplot(5, 2, 9)
-        self.ax_right_validity.sharex(self.ax_left_validity)
-        self.ax_pupil = self.fig.add_subplot(5, 2, (8, 10))
-
-        # Updates
-        self._running = False
-        self._update_thread = threading.Thread(target=self._update_loops, daemon=True)
-        self.update_signal_emitter = UpdateSignalEmitter()
-        self.update_signal_emitter.update_signal.connect(self._update_all)
+        self.ax_gaze = self.fig.add_subplot(3, 2, (1, 4), aspect=ar, adjustable='box')
+        self.ax_validity = self.fig.add_subplot(3, 2, 5)
+        self.ax_pupil = self.fig.add_subplot(3, 2, 6)
 
         # Data buffers
         self.gaze_hist: deque[tuple[float, float]] = deque(maxlen=plotting_window)  # (x, y) positions
@@ -53,13 +40,13 @@ class GazeDataCanvas(FigureCanvas):
         # Create a circle trace of gaze points counter clockwise starting from top
         for i in range(plotting_window):
             angle = 2 * np.pi * (i / plotting_window)
-            x = (self.screen_width / 2) + (self.screen_width / 4) * np.sin(angle)
+            x = (self.screen_width / 2) - (self.screen_width / 4) * np.sin(angle)
             y = (self.screen_height / 2) - (self.screen_height / 4) * np.cos(angle)
             self.gaze_hist.append((x, y))
 
         # Line objects
         self.pupil_hist_lines = None
-        self.validity_bars = None
+        self.validity_img = None
         self.gaze_scatter = None
 
         self._init_plots()
@@ -78,15 +65,11 @@ class GazeDataCanvas(FigureCanvas):
         self.ax_gaze.invert_yaxis()  # Invert Y axis to match screen coordinates
         
         # Eye validity bar
-        self.ax_left_validity.set_title("Eye Validity History")
-        self.ax_left_validity.set_yticks([0, 1, 2])
-        self.ax_left_validity.set_yticklabels(["", "Left", ""])
-        self.ax_right_validity.set_xlabel("Sample Index")
-        self.ax_right_validity.set_yticks([0, 1, 2])
-        self.ax_right_validity.set_yticklabels(["", "Right", ""])
-        self.ax_left_validity.set_ylim(-0.5, 2.5)
-        self.ax_right_validity.set_ylim(-0.5, 2.5)
-        self.ax_right_validity.set_xlim(-self.window_size, 0)
+        self.ax_validity.set_title("Eye Validity History")
+        self.ax_validity.set_yticks([0, 1])
+        self.ax_validity.set_yticklabels(["left", "right"])
+        self.ax_validity.set_xlabel("Sample Index")
+        self.ax_validity.set_xlim(-self.window_size, 0)
         
         # Pupil diameter plot
         self.ax_pupil.set_title("Pupil Diameter Trend")
@@ -94,25 +77,13 @@ class GazeDataCanvas(FigureCanvas):
         self.ax_pupil.set_ylabel("Diameter (mm)")
         self.ax_pupil.legend(["Left", "Right", "Mean"])
         self.ax_pupil.set_xlim(-self.window_size, 0)
+        self.ax_pupil.set_ylim(2, 5)
 
     def _update_all(self):
         """Update all plots"""
         self.update_gaze_trace()
         self.update_eye_validity()
         self.update_pupil_diameter()
-        self.draw()
-
-    def start_updates(self):
-        """Start the periodic update thread"""
-        if not self._running:
-            self._running = True
-            self._update_thread.start()
-
-    def stop_updates(self):
-        """Stop the periodic update thread"""
-        if self._running:
-            self._running = False
-            self._update_thread.join()
 
     def update_pupil_diameter(self):
         """Update line plot for pupil diameter trends"""
@@ -131,23 +102,23 @@ class GazeDataCanvas(FigureCanvas):
                 else:
                     mean_diameter = np.mean(pupil_data, axis=1)
                     line.set_ydata(mean_diameter)
-        self.ax_pupil.relim()
-        self.ax_pupil.autoscale_view()
 
     def update_eye_validity(self):
-        """Update bar plot for eye validity history"""
-        if self.validity_bars is not None:
-            for bar in self.validity_bars:
-                bar.remove()
-        validity_data = np.array(self.validity_hist)
-        left_validity = validity_data[:, 0]
-        right_validity = validity_data[:, 1]
-        left_colors = ['green' if v == 1 else 'red' for v in left_validity]
-        right_colors = ['green' if v == 1 else 'red' for v in right_validity]
-        indices = np.arange(0, -len(validity_data), -1)
-        self.validity_bars = []
-        self.validity_bars += self.ax_left_validity.bar(indices, 2, width=1, label='Left', color=left_colors, alpha=0.6, align='center')
-        self.validity_bars += self.ax_right_validity.bar(indices, 2, width=1, label='Right', color=right_colors, alpha=0.6, align='center')
+        """
+        Update bar plot for eye validity history
+        Using an image mapping to be efficient for plotting
+        """
+        validity_data = np.array(self.validity_hist).T  # Shape (2, N)
+        if self.validity_img is None:
+            self.validity_img = self.ax_validity.imshow(
+                validity_data,
+                aspect='auto',
+                cmap='RdYlGn',
+                vmin=0, vmax=1,
+                extent=[-self.window_size, 0, -0.5, 1.5]
+            )
+        else:
+            self.validity_img.set_data(validity_data)
 
 
     def update_gaze_trace(self):
@@ -155,16 +126,19 @@ class GazeDataCanvas(FigureCanvas):
         Update scatter plot for gaze position trace
         Use a scatter plot with fading single color and size decrease to indicate recency
         """
-        if self.gaze_scatter is not None:
-            self.gaze_scatter.remove()
         gaze_data = np.array(self.gaze_hist)
-        num_points = len(gaze_data)
-        if num_points == 0:
-            return
-        sizes = np.linspace(10, 100, num_points)[::-1]
-        colors = np.linspace(0.1, 1.0, num_points)[::-1]
-        self.gaze_scatter = self.ax_gaze.scatter(gaze_data[:, 0], gaze_data[:, 1], s=sizes, c=colors, cmap='Greys', alpha=0.7)
-        
+        sizes = np.linspace(50, 5, len(gaze_data)) # Size decrease
+        colors = np.linspace(1.0, 0.1, len(gaze_data))  # Fading effect
+        if self.gaze_scatter is None:
+            self.gaze_scatter = self.ax_gaze.scatter(
+                gaze_data[:, 0], gaze_data[:, 1],
+                s=sizes, c=colors, cmap='Greys', alpha=0.7
+            )
+        else:
+            self.gaze_scatter.set_offsets(gaze_data)
+            self.gaze_scatter.set_sizes(sizes)
+            self.gaze_scatter.set_array(colors)
+                
 
     def datas_callback(self, gaze_datas: GazeData):
         """Callback to only store gaze data (minimal processing)"""
@@ -180,12 +154,6 @@ class GazeDataCanvas(FigureCanvas):
             self.gaze_hist.append((x, y))
             self.validity_hist.append((left_validity, right_validity))
             self.pupil_hist.append((left_diameter, right_diameter))
-    
-    def _update_loops(self):
-        """Internal method to periodically update plots"""
-        while self._running:
-            self.update_signal_emitter.update_signal.emit()
-            time.sleep(1)  
         
 
 class GazeVisualizerWindow(QMainWindow):
@@ -195,10 +163,12 @@ class GazeVisualizerWindow(QMainWindow):
         self.setGeometry(100, 100, 800, 600)      
         self.canvas = GazeDataCanvas(screen_width=1920, screen_height=1200, plotting_window=200)
         self.setCentralWidget(self.canvas)
-    
-    def set_update_loop_state(self, running: bool):
-        """Start or stop the update loop"""
-        if running:
-            self.canvas.start_updates()
-        else:
-            self.canvas.stop_updates()
+        self._timer = QTimer(self)
+        self._timer.start(1000 // self.canvas.update_freq)
+        self._timer.timeout.connect(self._update)
+
+
+    def _update(self):
+        """Update the canvas plots"""
+        self.canvas._update_all()
+        self.canvas.draw_idle()
