@@ -10,6 +10,7 @@ DRONE_DATA_BLOCK_NAME = "ExperimentUnityDroneData"
 # Blcok counts for circular buffer
 GAZE_DATA_BLOCK_CNT = 100
 NBACK_SEQUENCE_LEN = 10
+DRONE_COUNT = 9
 
 @dataclass 
 class Metadata:
@@ -77,6 +78,79 @@ class NBackData:
                 stimulus = np.int8(data['stimulus']),
                 participant_response = np.int8(data['participant_response']),
                 is_correct = np.int8(data['is_correct']),
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing key in data dictionary: {e}")
+
+@dataclass
+class DroneData:
+    position_x: np.float32
+    position_y: np.float32
+    position_z: np.float32
+    orientation_x: np.float32
+    orientation_y: np.float32
+    orientation_z: np.float32
+    velocity_x: np.float32
+    velocity_y: np.float32
+    velocity_z: np.float32
+    angular_velocity_x: np.float32
+    angular_velocity_y: np.float32
+    angular_velocity_z: np.float32
+    acceleration_x: np.float32
+    acceleration_y: np.float32
+    acceleration_z: np.float32
+
+    def get_conversion_str(self) -> str:
+        return '<q3f3f3f3f3f3f'
+    
+    def __len__(self) -> int:
+        return self.size()
+    
+    @classmethod
+    def size(cls) -> int:
+        return 3*4 + 3*4 + 3*4 + 3*4 + 3*4
+    
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> "DroneData":
+        if len(buffer) < cls.size():
+            raise ValueError(f"Buffer size {len(buffer)} is smaller than expected size {cls.size()}.")
+        return DroneData(
+            position_x = np.frombuffer(buffer[0:4], dtype=np.float32)[0],
+            position_y = np.frombuffer(buffer[4:8], dtype=np.float32)[0],
+            position_z = np.frombuffer(buffer[8:12], dtype=np.float32)[0],
+            orientation_x = np.frombuffer(buffer[12:16], dtype=np.float32)[0],
+            orientation_y = np.frombuffer(buffer[16:20], dtype=np.float32)[0],
+            orientation_z = np.frombuffer(buffer[20:24], dtype=np.float32)[0],
+            velocity_x = np.frombuffer(buffer[24:28], dtype=np.float32)[0],
+            velocity_y = np.frombuffer(buffer[28:32], dtype=np.float32)[0],
+            velocity_z = np.frombuffer(buffer[32:36], dtype=np.float32)[0],
+            angular_velocity_x = np.frombuffer(buffer[36:40], dtype=np.float32)[0],
+            angular_velocity_y = np.frombuffer(buffer[40:44], dtype=np.float32)[0],
+            angular_velocity_z = np.frombuffer(buffer[44:48], dtype=np.float32)[0],
+            acceleration_x = np.frombuffer(buffer[48:52], dtype=np.float32)[0],
+            acceleration_y = np.frombuffer(buffer[52:56], dtype=np.float32)[0],
+            acceleration_z = np.frombuffer(buffer[56:60], dtype=np.float32)[0],
+        )
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "DroneData":
+        try:
+            return DroneData(
+                position_x = np.float32(data['position'][0]),
+                position_y = np.float32(data['position'][1]),
+                position_z = np.float32(data['position'][2]),
+                orientation_x = np.float32(data['orientation'][0]),
+                orientation_y = np.float32(data['orientation'][1]),
+                orientation_z = np.float32(data['orientation'][2]),
+                velocity_x = np.float32(data['velocity'][0]),
+                velocity_y = np.float32(data['velocity'][1]),
+                velocity_z = np.float32(data['velocity'][2]),
+                angular_velocity_x = np.float32(data['angular_velocity'][0]),
+                angular_velocity_y = np.float32(data['angular_velocity'][1]),
+                angular_velocity_z = np.float32(data['angular_velocity'][2]),
+                acceleration_x = np.float32(data['acceleration'][0]),
+                acceleration_y = np.float32(data['acceleration'][1]),
+                acceleration_z = np.float32(data['acceleration'][2]),
             )
         except KeyError as e:
             raise ValueError(f"Missing key in data dictionary: {e}")
