@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -254,3 +255,53 @@ class GazeData:
             )
         except KeyError as e:
             raise ValueError(f"Missing key in data dictionary: {e}")
+
+
+class ExperimentState(Enum):
+    Idle = 0
+    Wait = 1
+    WaitForUser = 2
+    Welcome = 3
+    RcControls = 4
+    Calibration = 5
+    FlyingInstructions = 6
+    FlyingPractice = 7
+    NBackInstructions = 8
+    NBackPractice = 9
+    ExperimentBegin = 10
+    Task = 11
+    Countdown = 12
+    Trial = 13
+    Finished = 14
+
+
+@dataclass
+class ExperimentStatus:
+    previous_state: ExperimentState
+    current_state: ExperimentState
+    next_state: ExperimentState
+    current_task: str
+    current_trial: int
+    nback_levels_order: list[int]
+    current_nback_level: int
+    state_enter_timestamp: np.int64
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ExperimentStatus":
+        try:
+            return ExperimentStatus(
+                previous_state=ExperimentState[data["previousState"]],
+                current_state=ExperimentState[data["state"]],
+                next_state=ExperimentState[data["nextState"]],
+                current_task=data["currentTask"],
+                current_trial=data["currentTrial"],
+                nback_levels_order=data["nbackLevelsOrder"],
+                state_enter_timestamp=np.int64(data["stateEnterTimestamp"]),
+                current_nback_level=data.get(
+                    "currentNBackLevel", -1
+                ),  # Optional field, default to -1 if not present
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing key in data dictionary: {e}")
+        except ValueError as e:
+            raise ValueError(f"Invalid value in data dictionary: {e}")
