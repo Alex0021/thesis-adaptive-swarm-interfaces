@@ -1,8 +1,5 @@
+import glob
 import logging
-import threading
-import time
-from queue import Queue
-from typing import TextIO
 
 import yaml
 from PyQt6.QtCore import Qt, QTimer
@@ -17,14 +14,36 @@ from PyQt6.QtWidgets import (
 
 from workload_inference.api import ExperimentAPI, ExperimentAPIError
 from workload_inference.constants import DATA_DIR
-from workload_inference.data_structures import ExperimentStatus, GazeData
+from workload_inference.data_structures import (
+    DroneData,
+    ExperimentState,
+    ExperimentStatus,
+    GazeData,
+    NBackData,
+)
+from workload_inference.py_receiver import SMReceiver, SMReceiverCircularBuffer
+from workload_inference.utilities import ExperimentDataWriter
 from workload_inference.visualize import GazeDataCanvas
 
+# Experiment specific constants
 CONFIG_FILE_NAME = "experiment.yaml"
 SAMPLE_CONFIG_FILE_NAME = "sample_experiment.yaml"
-DATA_FILE_NAME = "gaze_data.csv"
-CSV_HEADER = GazeData.__annotations__.keys()
+GAZE_DATA_FILE_NAME = "gaze_data.csv"
+DRONE_DATA_FILE_NAME = "drone_data.csv"
+NBACK_DATA_FILE_NAME = "nback_data.csv"
+GAZE_CSV_HEADER = GazeData.__annotations__.keys()
+DRONE_CSV_HEADER = ["timestamp"] + list(DroneData.__annotations__.keys())
+NBACK_CSV_HEADER = NBackData.__annotations__.keys()
 EXPERIMENT_STATUS_UPDATE_RATE_MS = 500
+
+# SM Block constants
+METADATA_BLOCK_NAME = "TobiiUnityMetadata"
+GAZE_DATA_BLOCK_NAME = "TobiiUnityGazeData"
+NBACK_DATA_BLOCK_NAME = "ExperimentUnityNBackData"
+DRONE_DATA_BLOCK_NAME = "ExperimentUnityDroneData"
+GAZE_DATA_BLOCK_CNT = 100
+NBACK_SEQUENCE_LEN = 10
+DRONE_COUNT = 9
 
 logger = logging.getLogger("ExperimentManager")
 
@@ -36,116 +55,110 @@ class ExperimentManager:
 
     def __init__(self, base_folder: str = "experiments", queue_size: int = 1000):
         self.base_folder = DATA_DIR / base_folder
-        self.data_queue: Queue[GazeData] = Queue(maxsize=queue_size)
+        self._api = ExperimentAPI()
+
+        # Listeners
+        self._gaze_receiver: SMReceiverCircularBuffer | None = None
+        self._drone_receiver: SMReceiver | None = None
+        self._nback_receiver: SMReceiver | None = None
+
+        # Data writers
+        self._gaze_data_writer: ExperimentDataWriter | None = None
+        self._drone_data_writer: ExperimentDataWriter | None = None
+
+        # Experiment status
+        self._last_status: ExperimentStatus | None = None
+        self.nback_latest_datas: list[NBackData] | None = None
+
         # Try to read experiment data from yaml file
         if not (self.base_folder / CONFIG_FILE_NAME).exists():
             logger.warning(
-                f"Experiment configuration file '{CONFIG_FILE_NAME}' not found in '{self.base_folder}'."
-                f" Using sample configuration '{SAMPLE_CONFIG_FILE_NAME}'."
+                "Experiment configuration file '%s' not found in '%s'."
+                " Using sample configuration '%s'.",
+                CONFIG_FILE_NAME,
+                self.base_folder,
+                SAMPLE_CONFIG_FILE_NAME,
             )
             if not (self.base_folder / SAMPLE_CONFIG_FILE_NAME).exists():
                 raise FileNotFoundError(
-                    f"Sample experiment configuration file '{SAMPLE_CONFIG_FILE_NAME}' not found"
-                    f" in '{self.base_folder}'. Please create an experiment configuration file."
+                    f"Sample experiment configuration file '{SAMPLE_CONFIG_FILE_NAME}' "
+                    f" not found in '{self.base_folder}'. "
+                    "Please create an experiment configuration file."
                 )
-            with open(self.base_folder / SAMPLE_CONFIG_FILE_NAME, "r") as f:
+            with open(self.base_folder / SAMPLE_CONFIG_FILE_NAME) as f:
                 self.experiment_config = yaml.safe_load(f)
         else:
-            with open(self.base_folder / CONFIG_FILE_NAME, "r") as f:
+            with open(self.base_folder / CONFIG_FILE_NAME) as f:
                 self.experiment_config = yaml.safe_load(f)
-        self._writer_thread: threading.Thread | None = None
-        self._running: bool = False
-        self._lock: threading.Lock = threading.Lock()
-        self._current_exp_filestream: TextIO | None = None
-        self._block_size: int = 100
-        self._data_cnt: int = 0
-        self._api = ExperimentAPI()
+        self._initialize_structure()
         logger.info("Initialized with queue size %d.", queue_size)
 
-    def datas_callback(self, datas: list[GazeData]) -> None:
+    def start_receivers(self) -> None:
         """
-        Callback function to receive new data points and store them in the queue.
+        Start the data receiving threads.
+        """
+        if self._gaze_receiver is not None and not self._gaze_receiver.is_alive():
+            self._gaze_receiver.start()
+        if self._drone_receiver is not None and not self._drone_receiver.is_alive():
+            self._drone_receiver.start()
+        if self._nback_receiver is not None and not self._nback_receiver.is_alive():
+            self._nback_receiver.start()
 
-        Args:
-            datas (list[GazeData]): The new data points to add.
-        Raises:
-            OverflowError: If the queue is full and cannot accept new data points.
+    def stop_receivers(self) -> None:
         """
-        if self.data_queue.qsize() + len(datas) > self.data_queue.maxsize:
-            raise OverflowError("Data queue is full. Cannot add new data points.")
-        for data in datas:
-            self.data_queue.put(data)
+        Stop the data receiving threads.
+        """
+        if self._gaze_receiver is not None and self._gaze_receiver.is_alive():
+            self._gaze_receiver.stop()
+        if self._drone_receiver is not None and self._drone_receiver.is_alive():
+            self._drone_receiver.stop()
+        if self._nback_receiver is not None and self._nback_receiver.is_alive():
+            self._nback_receiver.stop()
 
-    def start_recording(self) -> None:
-        """
-        Start the data recording thread.
-        """
-        # Create experiment data file
-        if not self._running:
-            self._initialize_structure()
-            self._running = True
-            self._data_cnt = 0
-            self._writer_thread = threading.Thread(target=self._data_writer)
-            self._writer_thread.start()
-            logger.info(
-                "Data recording started. Data blocks set to %d.", self._block_size
+    def initialize_receivers(self) -> None:
+        if self._gaze_receiver is None:
+            self._gaze_receiver = SMReceiverCircularBuffer(
+                GAZE_DATA_BLOCK_NAME, METADATA_BLOCK_NAME, GazeData, GAZE_DATA_BLOCK_CNT
+            )
+        if self._drone_receiver is None:
+            self._drone_receiver = SMReceiver(
+                DRONE_DATA_BLOCK_NAME, DroneData, 30, DRONE_COUNT
+            )
+        if self._nback_receiver is None:
+            self._nback_receiver = SMReceiver(
+                NBACK_DATA_BLOCK_NAME, NBackData, 15, NBACK_SEQUENCE_LEN
             )
 
-    def stop_recording(self) -> None:
-        """
-        Stop the data recording thread.
-        """
-        if self._running:
-            self._running = False
-            if self._writer_thread is not None:
-                self._writer_thread.join()
-                self._writer_thread = None
-            if self._current_exp_filestream is not None:
-                self._current_exp_filestream.close()
-                self._current_exp_filestream = None
-            logger.info("Data recording stopped. %d lines recorded.", self._data_cnt)
+    def initialize_data_writers(self) -> None:
+        if self._gaze_data_writer is None:
+            self._gaze_data_writer = ExperimentDataWriter(
+                header=GAZE_CSV_HEADER, name="gaze_data"
+            )
+        if self._drone_data_writer is None:
+            self._drone_data_writer = ExperimentDataWriter(
+                header=DRONE_CSV_HEADER, name="drone_data"
+            )
 
-    def _data_writer(self) -> None:
-        """
-        Thread function to write data from the queue to the experiment data file.
-        """
-        if self._current_exp_filestream is None:
-            raise RuntimeError("Experiment file stream is not initialized.")
-
-        while self._running:
-            if self.data_queue.qsize() >= self._block_size:
-                # Write block to file
-                for _ in range(self._block_size):
-                    gaze_data = self.data_queue.get()
-                    line = (
-                        ",".join(str(gaze_data.__dict__[field]) for field in CSV_HEADER)
-                        + "\n"
-                    )
-                    self._current_exp_filestream.write(line)
-                self._current_exp_filestream.flush()
-                self._data_cnt += self._block_size
-            time.sleep(0.01)
-
-        # Write remaining data in the queue
-        if self.data_queue.qsize() > 0:
-            self._data_cnt += self.data_queue.qsize()
-            for _ in range(self.data_queue.qsize()):
-                gaze_data = self.data_queue.get()
-                line = (
-                    ",".join(str(getattr(gaze_data, field)) for field in CSV_HEADER)
-                    + "\n"
-                )
-                self._current_exp_filestream.write(line)
-            self._current_exp_filestream.flush()
+    def initialize_listeners(self) -> None:
+        if self._gaze_receiver is not None and self._gaze_data_writer is not None:
+            self._gaze_receiver.register_listener(self._gaze_data_writer.datas_callback)
+        if self._drone_receiver is not None and self._drone_data_writer is not None:
+            self._drone_receiver.register_listener(
+                self._drone_data_writer.datas_callback
+            )
+        if self._nback_receiver is not None:
+            self._nback_receiver.register_listener(self.nback_datas_callback)
 
     def _initialize_structure(self, overwrite: bool = True) -> None:
         """
         Initialize the experiment data file structure.
 
         Args:
-            overwrite (bool, optional): Whether to overwrite existing files. Defaults to True.
+            overwrite (bool, optional): Whether to overwrite existing files.
+            Defaults to True.
         Raises:
-            FileExistsError: If the experiment data file already exists and overwrite is False.
+            FileExistsError: If the experiment data file already exists and
+            overwrite is False.
         """
         if "name" not in self.experiment_config:
             logger.warning(
@@ -155,37 +168,187 @@ class ExperimentManager:
             logger.warning(
                 "Participant name not found in configuration. Using 'person'."
             )
-        if "name" not in self.experiment_config["task"]:
-            logger.warning(
-                "Task name not found in configuration. Using 'unknown_task'."
+        if "tasks" not in self.experiment_config:
+            logger.error(
+                "At least one task must be defined in the experiment configuration."
             )
+            return
         exp_name = self.experiment_config.get("name", "anonymous")
         participant_name = self.experiment_config["participant"].get("name", "person")
-        task_name = self.experiment_config["task"].get("name", "unknown_task")
-        # Make sure folders are snake_case (especially for linux compatibility)
-        formatted_str_path = (
-            "/".join([exp_name, participant_name, task_name]).replace(" ", "_").lower()
+        tasks_list = self.experiment_config["tasks"]
+        # Generate all folders based on tasks and trials
+        for task in tasks_list:
+            if "name" not in task:
+                logger.error("Each task must have a name defined in the configuration.")
+                return
+            if "trials" not in task or not isinstance(task["trials"], int):
+                logger.error(
+                    "Task %s must have an integer 'trials' field defined.",
+                    task.get("name", "unknown"),
+                )
+                return
+            for trial in range(task["trials"]):
+                # Make sure folders are snake_case (especially for linux compatibility)
+                formatted_str_path = "/".join(
+                    part.strip().lower().replace(" ", "_")
+                    for part in [
+                        exp_name,
+                        participant_name,
+                        task["name"],
+                        f"trial_{trial+1}",
+                    ]
+                )
+                exp_folder = self.base_folder / formatted_str_path
+                exp_folder.mkdir(parents=True, exist_ok=True)
+
+        # Sanity check if any data file already exists
+        existing_files = glob.glob(
+            str(
+                self.base_folder
+                / exp_name
+                / participant_name
+                / "**"
+                / GAZE_DATA_FILE_NAME
+            ),
+            recursive=True,
         )
-        exp_folder = self.base_folder / formatted_str_path
-        exp_folder.mkdir(parents=True, exist_ok=True)
-        if (exp_folder / DATA_FILE_NAME).exists() and not overwrite:
+        existing_files += glob.glob(
+            str(
+                self.base_folder
+                / exp_name
+                / participant_name
+                / "**"
+                / DRONE_DATA_FILE_NAME
+            ),
+            recursive=True,
+        )
+        existing_files += glob.glob(
+            str(
+                self.base_folder
+                / exp_name
+                / participant_name
+                / "**"
+                / NBACK_DATA_FILE_NAME
+            ),
+            recursive=True,
+        )
+
+        if existing_files and not overwrite:
             raise FileExistsError(
-                f"Experiment data file '{DATA_FILE_NAME}' already exists in '{exp_folder}'."
-                " To bypass, set the 'overwrite' parameter to True."
+                "Some experiment data files already exists in "
+                f"{self.base_folder / exp_name / participant_name}."
+                " Please check carefully before overwriting. "
+                f"Found {len(existing_files)} existing files."
+                "Set overwrite=True or delete existing files to proceed."
             )
-        self._current_exp_filestream = open(
-            exp_folder / DATA_FILE_NAME, "w", encoding="utf-8"
+
+    def update_internal_state(self, new_state: ExperimentStatus) -> None:
+        """Update the internal experiment state based on the provided status."""
+        if self._last_status is None:
+            self._last_status = new_state
+            return
+
+        # Check for critical states (for data writing)
+        if new_state.current_state != self._last_status.current_state:
+            if new_state.current_state == ExperimentState.FlyingPractice:
+                # Set folder path
+                self._current_folder = (
+                    self.base_folder
+                    / self.experiment_config["name"]
+                    / self.experiment_config["participant"]["name"]
+                    / new_state.current_state.name
+                )
+                # Set file to data writers
+                self._gaze_data_writer.new_file(
+                    self._current_folder / GAZE_DATA_FILE_NAME
+                )
+                self._drone_data_writer.new_file(
+                    self._current_folder / DRONE_DATA_FILE_NAME
+                )
+                # Start recording
+                self._gaze_data_writer.start()
+                self._drone_data_writer.start()
+                self.start_receivers()
+            elif new_state.current_state == ExperimentState.NBackPractice:
+                # Set folder
+                self._current_folder = (
+                    self.base_folder
+                    / self.experiment_config["name"]
+                    / self.experiment_config["participant"]["name"]
+                    / new_state.current_state.name
+                    / f"NBack{new_state.current_nback_level}"
+                )
+                self._gaze_data_writer.new_file(
+                    self._current_folder / GAZE_DATA_FILE_NAME
+                )
+                self._gaze_data_writer.start()
+                self.start_receivers()
+            elif (
+                new_state.previous_state == ExperimentState.NBackPractice
+                and new_state.current_state != ExperimentState.NBackPractice
+            ):
+                # Save latest N-back data
+                self.dump_latest_nback_data()
+            elif new_state.current_state == ExperimentState.Trial:
+                # Set folder
+                self._current_folder = (
+                    self.base_folder
+                    / self.experiment_config["name"]
+                    / self.experiment_config["participant"]["name"]
+                    / f"{new_state.current_task}"
+                    / f"trial_{new_state.current_trial}"
+                )
+                # Set file to data writers
+                self._gaze_data_writer.new_file(
+                    self._current_folder / GAZE_DATA_FILE_NAME
+                )
+                self._drone_data_writer.new_file(
+                    self._current_folder / DRONE_DATA_FILE_NAME
+                )
+                # Start recording
+                self._gaze_data_writer.start()
+                self._drone_data_writer.start()
+                self.start_receivers()
+            else:
+                # Stop recording of writers
+                if self._gaze_data_writer is not None:
+                    self._gaze_data_writer.stop()
+                if self._drone_data_writer is not None:
+                    self._drone_data_writer.stop()
+
+    def nback_datas_callback(self, nback_datas: list[NBackData]) -> None:
+        """Callback to receive the latest N-back data."""
+        self.nback_latest_datas = nback_datas
+
+    def dump_latest_nback_data(self) -> None:
+        """Dump the latest N-back data into a csv file."""
+        if self.nback_latest_datas is None:
+            logger.warning("No N-back data available to dump.")
+            return
+        if self._current_folder is None:
+            logger.warning("Current folder is not set. Cannot dump N-back data.")
+            return
+        with open(
+            self._current_folder / NBACK_DATA_FILE_NAME, "w", encoding="utf-8"
+        ) as f:
+            f.write(",".join(NBACK_CSV_HEADER) + "\n")
+            for nback_data in self.nback_latest_datas:
+                f.write(
+                    ",".join(
+                        str(getattr(nback_data, field)) for field in NBACK_CSV_HEADER
+                    )
+                    + "\n"
+                )
+        logger.info(
+            "Dumped latest N-back data to '%s'",
+            self._current_folder / NBACK_DATA_FILE_NAME,
         )
-        # Write CSV header
-        header = ",".join(CSV_HEADER) + "\n"
-        self._current_exp_filestream.write(header)
-        self._current_exp_filestream.flush()
-        logger.info(f"Data structure ready at '{exp_folder}'.")
 
     def get_experiment_status(self) -> tuple[bool, ExperimentStatus | None]:
         """Fetch the current experiment status from the API."""
         try:
             status = self._api.get_experiment_state()
+            self.update_internal_state(status)
             return True, status
         except ExperimentAPIError as e:
             logger.error("Failed to fetch experiment status: %s", e)
@@ -197,6 +360,10 @@ class ExperimentManager:
             self._api.trigger_next_state()
         except ExperimentAPIError as e:
             logger.error("Failed to trigger next state: %s", e)
+
+    @property
+    def gaze_receiver(self) -> SMReceiverCircularBuffer | None:
+        return self._gaze_receiver
 
 
 class ExperimentManagerWindow:
@@ -227,6 +394,15 @@ class ExperimentManagerWindow:
             screen_height=1200,
             plotting_window=200,
         )
+        if self.experiment_manager.gaze_receiver is not None:
+            self.experiment_manager.gaze_receiver.register_listener(
+                self._gaze_visualizer.datas_callback
+            )
+        else:
+            logger.warning(
+                "Gaze receiver is not initialized. "
+                "Gaze visualizer will not receive data."
+            )
         # Experiment control and status widgets
         self._experiment_management_widget = QWidget()
         self._experiment_management_layout = QGridLayout()
@@ -260,7 +436,8 @@ class ExperimentManagerWindow:
             QLabel("**Participant UID:**", textFormat=Qt.TextFormat.MarkdownText), 1, 0
         )
         self._uid_value_label = QLabel(
-            f"{self.experiment_manager.experiment_config['participant'].get('uid', '????')}"
+            f"{self.experiment_manager.experiment_config['participant']
+               .get('uid', '????')}"
         )
         self._experiment_info_layout.addWidget(self._uid_value_label, 1, 1)
         # Task name label
