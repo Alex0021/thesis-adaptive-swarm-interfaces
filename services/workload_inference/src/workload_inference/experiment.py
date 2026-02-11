@@ -43,7 +43,7 @@ GAZE_DATA_BLOCK_NAME = "TobiiUnityGazeData"
 NBACK_DATA_BLOCK_NAME = "ExperimentUnityNBackData"
 DRONE_DATA_BLOCK_NAME = "ExperimentUnityDroneData"
 GAZE_DATA_BLOCK_CNT = 100
-NBACK_SEQUENCE_LEN = 10
+NBACK_SEQUENCE_LEN = 20
 DRONE_COUNT = 9
 
 logger = logging.getLogger("ExperimentManager")
@@ -279,7 +279,7 @@ class ExperimentManager:
                     self.base_folder
                     / self.experiment_config["name"]
                     / self.experiment_config["participant"]["uid"]
-                    / f"{new_status.current_task}"
+                    / f"task_{new_status.current_task}"
                     / f"trial_{new_status.current_trial}"
                 )
                 # Set file to data writers
@@ -559,7 +559,7 @@ class ExperimentManagerWindow:
             else "N/A"
         )
         self._current_nback_level_value_label.setText(
-            f"#{status.current_nback_level}"
+            f"{status.current_nback_level}"
             if status.current_nback_level >= 0
             else "N/A"
         )
@@ -589,3 +589,9 @@ class ExperimentManagerWindow:
 
     def show(self):
         self._window.show()
+
+    def close(self):
+        self._experiment_status_update_timer.stop()
+        self._flash_timer.stop()
+        self.experiment_manager.stop_receivers()
+        self._window.close()
