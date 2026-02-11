@@ -33,34 +33,38 @@ def main():
 
     try:
         experiment_manager = ExperimentManager()
+        experiment_manager.initialize_receivers()
+        experiment_manager.initialize_data_writers()
+        experiment_manager.initialize_listeners()
         experiment_window = ExperimentManagerWindow(experiment_manager)
         experiment_window.show()
+        # experiment_manager.gaze_receiver.start()
         experiment_window.start()
 
-        # receiver = ZMQReceiver()
-        # def print_drone_data(datas: list[dts.DroneData]):
-        #     for d in datas:
-        #         pos = np.array([d.position_x, d.position_y, d.position_z])
-        #         print(pos)
+    # receiver = ZMQReceiver()
+    # def print_drone_data(datas: list[dts.DroneData]):
+    #     for d in datas:
+    #         pos = np.array([d.position_x, d.position_y, d.position_z])
+    #         print(pos)
 
-        # receiver = SMReceiver(
-        #     mmap_name=dts.DRONE_DATA_BLOCK_NAME,
-        #     datatype=dts.DroneData,
-        #     update_rate=2,
-        #     listeners=[print_drone_data],
-        #     block_count=dts.DRONE_COUNT,
-        # )
-        # receiver =  SMReceiverCircularBuffer(
-        #     data_mmap_name=dts.GAZE_DATA_BLOCK_NAME,
-        #     metadata_mmap_name=dts.METADATA_BLOCK_NAME,
-        #     datatype=dts.GazeData,
-        #     buffer_size=dts.GAZE_DATA_BLOCK_CNT
-        # )
-        # receiver.register_listener(experiment_manager.datas_callback)
-        # # receiver.register_listener(data_processor.datas_callback)
-        # receiver.register_listener(visualizer.canvas.datas_callback)
-        # receiver.start()
-        # experiment_manager.start_recording()
+    # receiver = SMReceiver(
+    #     mmap_name=dts.DRONE_DATA_BLOCK_NAME,
+    #     datatype=dts.DroneData,
+    #     update_rate=2,
+    #     listeners=[print_drone_data],
+    #     block_count=dts.DRONE_COUNT,
+    # )
+    # receiver =  SMReceiverCircularBuffer(
+    #     data_mmap_name=dts.GAZE_DATA_BLOCK_NAME,
+    #     metadata_mmap_name=dts.METADATA_BLOCK_NAME,
+    #     datatype=dts.GazeData,
+    #     buffer_size=dts.GAZE_DATA_BLOCK_CNT
+    # )
+    # receiver.register_listener(experiment_manager.datas_callback)
+    # # receiver.register_listener(data_processor.datas_callback)
+    # receiver.register_listener(visualizer.canvas.datas_callback)
+    # receiver.start()
+    # experiment_manager.start_recording()
     except Exception as e:
         logger.error("%s", e)
         return
@@ -78,9 +82,7 @@ def main():
         pass
     finally:
         # receiver.stop()
-        experiment_manager.stop_recording()
-
-    logger.info("Workload Inference Service Stopped")
+        logger.info("Workload Inference Service Stopped")
 
     # if os.environ.get("PYTHONDEBUG", "0") == "1":
     #     print("Waiting for debugger to attach...")
