@@ -265,20 +265,21 @@ class GazeData:
 
 class ExperimentState(Enum):
     Idle = 0
-    Wait = 1
-    WaitForUser = 2
-    Welcome = 3
-    RcControls = 4
-    Calibration = 5
-    FlyingInstructions = 6
-    FlyingPractice = 7
-    NBackInstructions = 8
-    NBackPractice = 9
-    ExperimentBegin = 10
-    Task = 11
-    Countdown = 12
-    Trial = 13
-    Finished = 14
+    IdleSilent = 1
+    Wait = 2
+    WaitForUser = 3
+    Welcome = 4
+    RcControls = 5
+    Calibration = 6
+    FlyingInstructions = 7
+    FlyingPractice = 8
+    NBackInstructions = 9
+    NBackPractice = 10
+    ExperimentBegin = 11
+    Task = 12
+    Countdown = 13
+    Trial = 14
+    Finished = 15
 
 
 @dataclass
@@ -286,7 +287,7 @@ class ExperimentStatus:
     previous_state: ExperimentState
     current_state: ExperimentState
     next_state: ExperimentState
-    current_task: str
+    current_task: int
     current_trial: int
     nback_levels_order: list[int]
     current_nback_level: int
