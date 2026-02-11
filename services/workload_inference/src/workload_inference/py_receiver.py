@@ -85,7 +85,7 @@ class SMReceiver(PyReceiverBase):
         datatype: type[dts.DataclassLike],
         update_rate: int,
         block_count: int = 1,
-        listeners: list[Listener] = [],
+        listeners: list[Listener] | None = None,
         with_console: bool = False,
     ):
         super().__init__()
@@ -96,7 +96,7 @@ class SMReceiver(PyReceiverBase):
         self._datatype = datatype
         self._update_rate = update_rate
         self._data_timestamp: float = 0.0
-        self._listeners = listeners
+        self._listeners = listeners if listeners is not None else []
         self._logger.info("SMReceiver initialized.")
         self._with_console = with_console
 
