@@ -1,10 +1,12 @@
+import contextlib
+import logging
 import sys
 import threading
 import time
-import logging
-from typing import Optional, Callable, Iterable, Any, List
-from queue import Queue
 from pathlib import Path
+from queue import Queue
+from typing import Any, Callable, Iterable, List, Optional
+
 from workload_inference.data_structures import DataclassLike
 
 
@@ -55,7 +57,11 @@ class ConsoleManager:
         idx = 0
         while not self._stop_event.is_set():
             with self._lock:
-                prefix = f"{self._spinner[idx % len(self._spinner)]} " if self._use_spinner else ""
+                prefix = (
+                    f"{self._spinner[idx % len(self._spinner)]} "
+                    if self._use_spinner
+                    else ""
+                )
                 line = f"\r{prefix}{self._text}"
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -110,27 +116,29 @@ class ExperimentDataWriter:
             self.new_file(self.filepath)
 
     def datas_callback(self, datas: list[DataclassLike]) -> None:
-        """Callback to push a batch of data objects into the internal queue.
-
-        Raises OverflowError if there is not enough space for the whole batch.
-        """
+        """Callback to push a batch of data objects into the internal queue."""
+        if not self._running:
+            return
         if self._queue.qsize() + len(datas) > self._queue.maxsize:
-            self._logger.warning("Queue overflow attempted: have %d incoming %d max %d", self._queue.qsize(), len(datas), self._queue.maxsize)
-            raise OverflowError("Data queue is full. Cannot add new data points.")
+            self._logger.warning(
+                "Queue overflow attempted: have %d incoming %d max %d",
+                self._queue.qsize(),
+                len(datas),
+                self._queue.maxsize,
+            )
+            return
         for d in datas:
             self._queue.put(d)
-    
+
     def new_file(self, filepath: Path) -> None:
-        """Set the output file path. Automatically stops the writer if it is running and flushes remaining data."""
+        """Set the output file path. Automatically stops the writer
+        if it is running and flushes remaining data."""
         if self._running:
             self.stop()
 
         self.filepath = filepath
         # Ensure parent dir exists
-        try:
-            self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
         self._filestream = open(self.filepath, "w", encoding=self._encoding)
         if self._header:
             self._filestream.write(",".join(self._header) + "\n")
@@ -140,7 +148,7 @@ class ExperimentDataWriter:
     def start(self) -> None:
         """
         Start the internal writer thread.
-        
+
         Raises:
             ValueError if the output file is not set. Does nothing if already running.
         """
@@ -195,28 +203,21 @@ class ExperimentDataWriter:
             raise RuntimeError("File stream is not initialized.")
 
         self._logger.debug("Writer loop running")
-        while True:
-                with self._lock:
-                    running = self._running
-
-                if self._queue.qsize() >= self._block_size:
-                    for _ in range(self._block_size):
-                        item = self._queue.get()
-                        line = self._format_item(item)
-                        self._filestream.write(line + "\n")
-                    self._filestream.flush()
-                    self._data_cnt += self._block_size
-                    self._logger.debug("Wrote block of %d lines (total %d)", self._block_size, self._data_cnt)
-                else:
-                    if not running:
-                        break
-                    time.sleep(self.WAIT_BLOCK_TIMEOUT)
-
-        # ensure any buffered data is flushed
-        try:
-            self._filestream.flush()
-        except Exception:
-            pass
+        while self._running:
+            if self._queue.qsize() >= self._block_size:
+                for _ in range(self._block_size):
+                    item = self._queue.get()
+                    line = self._format_item(item)
+                    self._filestream.write(line + "\n")
+                self._filestream.flush()
+                self._data_cnt += self._block_size
+                self._logger.debug(
+                    "Wrote block of %d lines (total %d)",
+                    self._block_size,
+                    self._data_cnt,
+                )
+            else:
+                time.sleep(self.WAIT_BLOCK_TIMEOUT)
 
     @property
     def data_count(self) -> int:
