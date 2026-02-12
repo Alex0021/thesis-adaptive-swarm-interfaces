@@ -15,6 +15,7 @@ from workload_inference.py_receiver import (
     SMReceiverCircularBuffer,
     ZMQReceiver,
 )
+from workload_inference.generator import FakeGazeGenerator
 
 
 def setup_logging():
@@ -38,7 +39,16 @@ def main():
         experiment_manager.initialize_listeners()
         experiment_window = ExperimentManagerWindow(experiment_manager)
         experiment_window.show()
-        # experiment_manager.gaze_receiver.start()
+        # fake_data_generator = FakeGazeGenerator(
+        #     callback=experiment_window._gaze_visualizer.datas_callback,
+        #     frequency=60.0,
+        #     noise=0.05,
+        #     speed=2.5,
+        #     pupil_mean=3.5,
+        # )
+        # fake_data_generator.start()
+        experiment_window.attach_listeners()
+        experiment_manager.gaze_receiver.start()
         experiment_window.start()
 
     # receiver = ZMQReceiver()
