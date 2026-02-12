@@ -171,16 +171,19 @@ class ExperimentDataWriter:
             self._running = False
 
         # Wait for thread to finish
-        if self._thread is not None:
-            self._thread.join()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._logger.info("Waiting for writer thread to finish...")
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                self._logger.warning("Writer thread did not finish in time")
             self._thread = None
 
         # Write any remaining items in queue
         remaining = self._queue.qsize()
         if remaining:
             self._logger.info("Flushing %d remaining items before close", remaining)
-        while self._queue.qsize() > 0:
-            item = self._queue.get()
+        while not self._queue.empty():
+            item = self._queue.get(self.WAIT_BLOCK_TIMEOUT)
             line = self._format_item(item)
             self._filestream.write(line + "\n")
         self._filestream.flush()
@@ -206,7 +209,7 @@ class ExperimentDataWriter:
         while self._running:
             if self._queue.qsize() >= self._block_size:
                 for _ in range(self._block_size):
-                    item = self._queue.get()
+                    item = self._queue.get(self.WAIT_BLOCK_TIMEOUT)
                     line = self._format_item(item)
                     self._filestream.write(line + "\n")
                 self._filestream.flush()
