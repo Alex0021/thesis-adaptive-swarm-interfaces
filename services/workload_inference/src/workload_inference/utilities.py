@@ -186,6 +186,7 @@ class ExperimentDataWriter:
             item = self._queue.get(self.WAIT_BLOCK_TIMEOUT)
             line = self._format_item(item)
             self._filestream.write(line + "\n")
+            self._data_cnt += 1
         self._filestream.flush()
         self._filestream.close()
         self._logger.info("Stopped writer, wrote %d lines", self._data_cnt)
