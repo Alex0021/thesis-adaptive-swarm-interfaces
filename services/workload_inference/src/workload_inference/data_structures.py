@@ -1,18 +1,26 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import numpy as np
 
 
 # Type aliases
 class DataclassLike(Protocol):
-    @staticmethod
-    def size() -> int: ...
-    @staticmethod
-    def from_buffer(data: bytes) -> "DataclassLike": ...
-    @staticmethod
-    def from_dict(data: dict[str, Any]) -> "DataclassLike": ...
+    @classmethod
+    def size(cls) -> int: ...
+    @classmethod
+    def from_buffer(cls, data: bytes) -> DataclassLike: ...
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DataclassLike: ...
+
+
+T = TypeVar("T", bound=DataclassLike)
+
+
+class Listener(Protocol[T]):
+    def __call__(self, datas: Sequence[T], batch_update: bool = False) -> None: ...
 
 
 @dataclass
@@ -32,7 +40,7 @@ class Metadata:
         return 1 + 1 + 1
 
     @classmethod
-    def from_buffer(cls, buffer: bytes) -> "Metadata":
+    def from_buffer(cls, buffer: bytes) -> Metadata:
         return Metadata(
             stream_ready=np.frombuffer(buffer[0:1], dtype=np.uint8)[0],
             calibration_ok=np.frombuffer(buffer[1:2], dtype=np.uint8)[0],
@@ -60,7 +68,7 @@ class NBackData:
         return 8 + 8 + 1 + 1 + 1 + 1
 
     @classmethod
-    def from_buffer(cls, buffer: bytes) -> "NBackData":
+    def from_buffer(cls, buffer: bytes) -> NBackData:
         if len(buffer) < cls.size():
             raise ValueError(
                 f"Buffer size {len(buffer)} is smaller than expected size {cls.size()}."
@@ -75,7 +83,7 @@ class NBackData:
         )
 
     @classmethod
-    def from_dict(cls, data: dict) -> "NBackData":
+    def from_dict(cls, data: dict) -> NBackData:
         try:
             return NBackData(
                 timestamp=np.int64(data["timestamp"]),
@@ -86,7 +94,7 @@ class NBackData:
                 is_correct=np.int8(data["is_correct"]),
             )
         except KeyError as e:
-            raise ValueError(f"Missing key in data dictionary: {e}")
+            raise ValueError(f"Missing key in data dictionary: {e}") from e
 
 
 @dataclass
@@ -120,7 +128,7 @@ class DroneData:
         return 8 + 1 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4
 
     @classmethod
-    def from_buffer(cls, buffer: bytes) -> "DroneData":
+    def from_buffer(cls, buffer: bytes) -> DroneData:
         if len(buffer) < cls.size():
             raise ValueError(
                 f"Buffer size {len(buffer)} is smaller than expected size {cls.size()}."
@@ -200,7 +208,7 @@ class GazeData:
         return 8 + 3 * 4 + 3 * 4 + 2 * 4 + 2 * 4 + 1 + 1 + 4 + 4
 
     @classmethod
-    def from_buffer(cls, buffer: bytes) -> "GazeData":
+    def from_buffer(cls, buffer: bytes) -> GazeData:
         return GazeData(
             timestamp=np.frombuffer(buffer[0:8], dtype=np.int64)[0],
             left_gaze_point_x=np.frombuffer(buffer[8:12], dtype=np.float32)[0],
@@ -220,7 +228,7 @@ class GazeData:
         )
 
     @classmethod
-    def from_dict(cls, data: dict) -> "GazeData":
+    def from_dict(cls, data: dict) -> GazeData:
         try:
             return GazeData(
                 timestamp=np.int64(data["system_time_stamp"]),
@@ -260,7 +268,7 @@ class GazeData:
                 right_pupil_diameter=np.float32(data["right_pupil_diameter"]),
             )
         except KeyError as e:
-            raise ValueError(f"Missing key in data dictionary: {e}")
+            raise ValueError(f"Missing key in data dictionary: {e}") from e
 
 
 class ExperimentState(Enum):
@@ -294,7 +302,7 @@ class ExperimentStatus:
     state_enter_timestamp: np.int64
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ExperimentStatus":
+    def from_dict(cls, data: dict) -> ExperimentStatus:
         try:
             return ExperimentStatus(
                 previous_state=ExperimentState[data["previousState"]],
@@ -309,6 +317,6 @@ class ExperimentStatus:
                 ),  # Optional field, default to -1 if not present
             )
         except KeyError as e:
-            raise ValueError(f"Missing key in data dictionary: {e}")
+            raise ValueError(f"Missing key in data dictionary: {e}") from e
         except ValueError as e:
-            raise ValueError(f"Invalid value in data dictionary: {e}")
+            raise ValueError(f"Invalid value in data dictionary: {e}") from e
