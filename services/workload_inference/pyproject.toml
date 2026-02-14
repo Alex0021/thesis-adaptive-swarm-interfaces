@@ -34,6 +34,7 @@ line_length = 88
 [tool.mypy]
 python_version = "3.14"
 disable_error_code = ["import-untyped"]
+check_untyped_defs = true
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
