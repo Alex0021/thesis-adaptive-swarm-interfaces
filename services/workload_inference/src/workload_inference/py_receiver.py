@@ -122,20 +122,18 @@ class SMReceiver(PyReceiverBase):
     def _run(self) -> None:
         self._monitor.start()
 
+        target_interval: float = 1.0 / self._update_rate
         while self._running:
-            if time.time() - self._last_timestamp >= 1.0 / self._update_rate:
-                datas: list[dts.DataclassLike] = self.read_data_blocks()
-                self._last_timestamp = time.time()
-                # Notify listeners
-                with self._lock:
-                    for listener in self._listeners:
-                        listener(datas)
-                # Update monitor
-                self._monitor.update(len(datas))
-            else:
-                time.sleep(
-                    1.0 / (self._update_rate * 10)
-                )  # Sleep a bit to avoid busy waiting
+            loop_start = time.perf_counter()
+
+            datas: list[dts.DataclassLike] = self.read_data_blocks()
+            # Notify listeners
+            with self._lock:
+                for listener in self._listeners:
+                    listener(datas)
+            # Update monitor
+            self._monitor.update(len(datas))
+
             if self._with_console:
                 self._console.print(
                     f"Data Rate: {self._monitor.get_data_rate():.1f} Hz"
@@ -143,6 +141,11 @@ class SMReceiver(PyReceiverBase):
                     f" | Total: {self._monitor.get_total_packets()}     ",
                     use_spinner=True,
                 )
+
+            elapsed = time.perf_counter() - loop_start
+            remaining = target_interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
         self._monitor.reset()
 

@@ -76,6 +76,8 @@ class ExperimentManager:
         self._last_status: ExperimentStatus | None = None
         self.nback_latest_datas: list[NBackData] | None = None
         self._request_nback_dump = False
+        self._start_time: float | None = None
+        self._duration: float | None = None
 
         # Threads
         self._api_thread: threading.Thread | None = None
@@ -252,8 +254,20 @@ class ExperimentManager:
             self._last_status = new_status
             return
 
+        if (
+            new_status.current_state == ExperimentState.Wait
+            and new_status.previous_state == ExperimentState.Welcome
+            and self._start_time is None
+        ):
+            self._start_time = time.time()
         # Check for critical states (for data writing)
         if new_status.current_state != self._last_status.current_state:
+            if (
+                new_status.current_state == ExperimentState.Finished
+                and self._start_time is not None
+            ):
+                self._duration = time.time() - self._start_time
+                self._write_extra_experiment_info()
             if new_status.current_state == ExperimentState.FlyingPractice:
                 # Set folder path
                 self._current_folder = (
@@ -263,16 +277,20 @@ class ExperimentManager:
                     / new_status.current_state.name
                 )
                 # Set file to data writers
-                self._gaze_data_writer.new_file(
-                    self._current_folder / GAZE_DATA_FILE_NAME
-                )
-                self._drone_data_writer.new_file(
-                    self._current_folder / DRONE_DATA_FILE_NAME
-                )
-                # Start recording
-                self._gaze_data_writer.start()
-                self._drone_data_writer.start()
-                self.start_receivers()
+                if (
+                    self._gaze_data_writer is not None
+                    and self._drone_data_writer is not None
+                ):
+                    self._gaze_data_writer.new_file(
+                        self._current_folder / GAZE_DATA_FILE_NAME
+                    )
+                    self._drone_data_writer.new_file(
+                        self._current_folder / DRONE_DATA_FILE_NAME
+                    )
+                    # Start recording
+                    self._gaze_data_writer.start()
+                    self._drone_data_writer.start()
+                    self.start_receivers()
             elif new_status.current_state == ExperimentState.NBackPractice:
                 # Set folder
                 self._current_folder = (
@@ -358,9 +376,31 @@ class ExperimentManager:
                 self.update_internal_state(self._current_status)
                 self._api_on_error = False
             except ExperimentAPIError as e:
-                logger.error("Failed to fetch experiment status: %s", e)
+                logger.warning("Failed to fetch experiment status: %s", e)
                 self._api_on_error = True
             time.sleep(EXPERIMENT_STATUS_UPDATE_RATE_MS / 1000)
+
+    def _write_extra_experiment_info(self) -> None:
+        """Write extra experiment info such as duration into a yaml file."""
+        if self.base_folder is None:
+            logger.warning(
+                "Base folder is not set. Cannot write extra experiment info."
+            )
+            return
+        extra_info = {
+            "duration_sec": self._duration,
+        }
+        folder = (
+            self.base_folder
+            / self.experiment_config["name"]
+            / self.experiment_config["participant"]["uid"]
+        )
+        with open(folder / "extra_info.yaml", "w") as f:
+            yaml.dump(extra_info, f)
+        logger.info(
+            "Wrote extra experiment info to '%s'",
+            folder / "extra_info.yaml",
+        )
 
     def close(self):
         """Perform cleanup when closing the experiment manager."""
@@ -489,7 +529,7 @@ class ExperimentManagerWindow:
 
         # NBack info panel
         nback_info_layout = QHBoxLayout()
-        self._experiment_management_layout.addLayout(nback_info_layout, 2, 0)
+        self._experiment_management_layout.addLayout(nback_info_layout, 2, 0, 1, 2)
         # Nback sequence label
         nback_info_layout.addWidget(
             QLabel("**N-back order:**", textFormat=Qt.TextFormat.MarkdownText)
@@ -560,6 +600,16 @@ class ExperimentManagerWindow:
 
         self._experiment_management_layout.addWidget(state_container, 1, 1)
 
+        # Ellapsed Time label
+        self._ellapsed_time_label = QLabel(
+            "00:00", alignment=Qt.AlignmentFlag.AlignRight
+        )
+        self._ellapsed_time_label.setStyleSheet("font-size: 20px; font-weight: bold;")
+        self._experiment_management_layout.addWidget(self._ellapsed_time_label, 2, 2)
+        self._ellapsed_timer = QTimer()
+        self._ellapsed_timer.timeout.connect(self._update_ellapsed_time)
+        self._ellapsed_timer.start(1000)
+
         # Experiment buttons
         buttons_panel = QWidget()
         buttons_layout = QGridLayout()
@@ -579,6 +629,17 @@ class ExperimentManagerWindow:
             self._update_experiment_status
         )
         self._experiment_status_update_timer.start(500)
+
+    def _update_ellapsed_time(self):
+        if self.experiment_manager._duration is not None:
+            self._ellapsed_timer.stop()
+        if self.experiment_manager._start_time is None:
+            self._ellapsed_time_label.setText("00:00")
+            return
+        ellapsed_seconds = int(time.time() - self.experiment_manager._start_time)
+        minutes = ellapsed_seconds // 60
+        seconds = ellapsed_seconds % 60
+        self._ellapsed_time_label.setText(f"{minutes:02d}:{seconds:02d}")
 
     def _update_experiment_status(self):
         self._toggle_current_state_border()

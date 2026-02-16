@@ -178,6 +178,11 @@ class DroneData:
         except KeyError as e:
             raise ValueError(f"Missing key in data dictionary: {e}") from e
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DroneData):
+            return NotImplemented
+        return self.timestamp == other.timestamp and self.id == other.id
+
 
 @dataclass
 class GazeData:
@@ -196,16 +201,20 @@ class GazeData:
     right_validity: np.int8
     left_pupil_diameter: np.float32
     right_pupil_diameter: np.float32
+    left_openness_validity: np.int8 = 0
+    right_openness_validity: np.int8 = 0
+    left_openness: np.float32 = 0.0
+    right_openness: np.float32 = 0.0
 
     def get_conversion_str(self) -> str:
-        return "<q10f2B2f"
+        return "<q10f2B2f2B2f"
 
     def __len__(self) -> int:
         return self.size()
 
     @classmethod
     def size(cls) -> int:
-        return 8 + 3 * 4 + 3 * 4 + 2 * 4 + 2 * 4 + 1 + 1 + 4 + 4
+        return 8 + 3 * 4 + 3 * 4 + 2 * 4 + 2 * 4 + 2 * 1 + 2 * 4 + 2 * 1 + 2 * 4
 
     @classmethod
     def from_buffer(cls, buffer: bytes) -> GazeData:
@@ -225,6 +234,10 @@ class GazeData:
             right_validity=np.frombuffer(buffer[49:50], dtype=np.int8)[0],
             left_pupil_diameter=np.frombuffer(buffer[50:54], dtype=np.float32)[0],
             right_pupil_diameter=np.frombuffer(buffer[54:58], dtype=np.float32)[0],
+            left_openness_validity=np.frombuffer(buffer[58:59], dtype=np.int8)[0],
+            right_openness_validity=np.frombuffer(buffer[59:60], dtype=np.int8)[0],
+            left_openness=np.frombuffer(buffer[60:64], dtype=np.float32)[0],
+            right_openness=np.frombuffer(buffer[64:68], dtype=np.float32)[0],
         )
 
     @classmethod
@@ -266,6 +279,14 @@ class GazeData:
                 right_validity=np.int8(data["right_pupil_validity"]),
                 left_pupil_diameter=np.float32(data["left_pupil_diameter"]),
                 right_pupil_diameter=np.float32(data["right_pupil_diameter"]),
+                left_openness_validity=np.int8(
+                    data.get("left_eye_openness_validity", 0)
+                ),
+                right_openness_validity=np.int8(
+                    data.get("right_eye_openness_validity", 0)
+                ),
+                left_openness=np.float32(data.get("left_eye_openness", 0.0)),
+                right_openness=np.float32(data.get("right_eye_openness", 0.0)),
             )
         except KeyError as e:
             raise ValueError(f"Missing key in data dictionary: {e}") from e

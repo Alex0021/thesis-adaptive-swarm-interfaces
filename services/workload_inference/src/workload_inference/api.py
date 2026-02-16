@@ -1,8 +1,13 @@
+import logging
+
 import requests
 
 from workload_inference.data_structures import ExperimentStatus
 
 API_TIMEOUT = 0.1  # seconds
+
+# Suppress anoying http request deub messages
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 class ExperimentAPIError(Exception):
