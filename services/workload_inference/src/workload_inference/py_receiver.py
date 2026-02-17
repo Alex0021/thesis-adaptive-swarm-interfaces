@@ -216,9 +216,10 @@ class SMReceiverCircularBuffer(PyReceiverBase):
         self._buffer_size = buffer_size
         self._datatype = datatype
         self._listeners = listeners if listeners is not None else []
-        self._data_ptr: int = 0
+        self._data_tail: int = 0
         self._with_console = with_console
         self._target_hz = target_hz
+        self._flag_resync = False
         self._logger.info("SMReceiverCircularBuffer initialized.")
 
     def start(self) -> None:
@@ -234,6 +235,7 @@ class SMReceiverCircularBuffer(PyReceiverBase):
             self._thread.start()
 
     def stop(self) -> None:
+        self._set_receiver_ready_flag(False)  # Set receiver ready flag to False
         if self._thread is not None:
             self._running = False
             self._thread.join()
@@ -241,24 +243,17 @@ class SMReceiverCircularBuffer(PyReceiverBase):
 
     def _run(self) -> None:
         target_interval: float = 1.0 / self._target_hz
+        # Set receiver ready flag in metadata
+        self._set_receiver_ready_flag(True)
         while self._running:
             # Check the stream_ready flag in metadata
             metadata = self.read_metadata_block()
-            self._ready = metadata.stream_ready == 1
+            self._ready = metadata.is_sender_ready == 1
 
             if not self._ready:
                 if self._with_console:
                     self._console.print(
                         "Waiting for stream to be ready...", use_spinner=True
-                    )
-                time.sleep(0.1)
-                continue
-
-            # Here you can add code to read gaze data if needed
-            if metadata.active_data_cnt == 0:
-                if self._with_console:
-                    self._console.print(
-                        "No new gaze data available...", use_spinner=True
                     )
                 time.sleep(0.1)
                 continue
@@ -270,25 +265,26 @@ class SMReceiverCircularBuffer(PyReceiverBase):
         while self._running:
             loop_start = time.perf_counter()
             metadata = self.read_metadata_block()
-            if metadata.active_data_cnt > 0:
-                gaze_datas = self.read_data_blocks(int(metadata.active_data_cnt))
-                # Notify listeners
-                with self._lock:
-                    for listener in self._listeners:
-                        listener(gaze_datas)
-                # Update monitor
-                self._monitor.update(len(gaze_datas))
-                # reset cnt
-                metadata.active_data_cnt = np.uint8(0)
-                self.write_metadata_cnt(metadata)
-                if self._with_console:
-                    self._console.print(
-                        f"Gaze Data Rate: {self._monitor.get_data_rate():.1f} Hz"
-                        f" | Avg Data Count: {self._monitor.get_avg_data_cnt():.1f}"
-                        f" | Total: {self._monitor.get_total_packets()}     ",
-                        use_spinner=True,
-                    )
-                # self.pretty_print_gaze_data(gaze_datas[-1])
+            if metadata.is_sender_ready == 1:
+                gaze_datas = self.read_data_blocks(metadata)
+                if len(gaze_datas) > 0:
+                    # Notify listeners
+                    with self._lock:
+                        for listener in self._listeners:
+                            listener(gaze_datas)
+                    # Update tail in metadata and write back
+                    metadata.tail = np.int32(self._data_tail)
+                    self.write_metadata_block(metadata)
+                    # Update monitor
+                    self._monitor.update(len(gaze_datas))
+                    if self._with_console:
+                        self._console.print(
+                            f"Gaze Data Rate: {self._monitor.get_data_rate():.1f} Hz"
+                            f" | Avg Data Count: {self._monitor.get_avg_data_cnt():.1f}"
+                            f" | Total: {self._monitor.get_total_packets()}     ",
+                            use_spinner=True,
+                        )
+                    # self.pretty_print_gaze_data(gaze_datas[-1])
 
             elapsed = time.perf_counter() - loop_start
             remaining = target_interval - elapsed
@@ -326,7 +322,7 @@ class SMReceiverCircularBuffer(PyReceiverBase):
         data = self._metadata_block.read(dts.Metadata.size())
         return dts.Metadata.from_buffer(data)
 
-    def read_data_blocks(self, count: int = 1) -> list[dts.DataclassLike]:
+    def read_data_blocks(self, metadata: dts.Metadata) -> list[dts.DataclassLike]:
         """
         Read gaze data blocks from shared memory.
 
@@ -339,26 +335,34 @@ class SMReceiverCircularBuffer(PyReceiverBase):
 
         assert self._data_block is not None, "Gaze data block is not initialized."
 
+        count = (metadata.head - self._data_tail) % self._buffer_size
+
         for _ in range(count):
-            self._data_block.seek(self._data_ptr)
+            self._data_block.seek(self._data_tail * block_size)
             data = self._data_block.read(block_size)
             gaze_data = self._datatype.from_buffer(data)
             datas.append(gaze_data)
-
-            self._data_ptr += block_size
-            # Check for circular buffer wrap-around
-            if self._data_ptr >= block_size * self._buffer_size:
-                self._data_ptr = 0
+            self._data_tail = (self._data_tail + 1) % self._buffer_size
 
         return datas
 
-    def write_metadata_cnt(self, metadata: dts.Metadata) -> None:
+    def write_metadata_block(self, metadata: dts.Metadata) -> None:
         """
-        Write the updated active_data_cnt back to the metadata block.
+        Write the updated metadata back to the metadata block.
         """
         assert self._metadata_block is not None, "Metadata block is not initialized."
-        self._metadata_block.seek(2)  # Offset for active_data_cnt
-        self._metadata_block.write(metadata.active_data_cnt.tobytes())
+        # Only write receiver side fields
+        self._metadata_block.seek(2)  # Offset for receiver active
+        self._metadata_block.write(metadata.is_receiver_ready.tobytes())
+        self._metadata_block.seek(3 + 4)  # Offset for receiver tail
+        self._metadata_block.write(metadata.tail.tobytes())
+        self._metadata_block.flush()
+
+    def _set_receiver_ready_flag(self, ready: bool = True) -> None:
+        """Set the receiver ready flag so that the sender can start writing data."""
+        assert self._metadata_block is not None, "Metadata block is not initialized."
+        self._metadata_block.seek(2)  # Offset for receiver active
+        self._metadata_block.write((1 if ready else 0).to_bytes(1, byteorder="little"))
         self._metadata_block.flush()
 
 

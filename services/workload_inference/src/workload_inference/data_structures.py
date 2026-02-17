@@ -25,26 +25,30 @@ class Listener(Protocol[T]):
 
 @dataclass
 class Metadata:
-    stream_ready: np.uint8
+    is_sender_ready: np.uint8
     calibration_ok: np.uint8
-    active_data_cnt: np.uint8
+    is_receiver_ready: np.uint8
+    head: np.int32
+    tail: np.int32
 
     def get_conversion_str(self) -> str:
-        return "BBB"
+        return "BBBII"
 
     def __len__(self) -> int:
         return self.size()
 
     @classmethod
     def size(cls) -> int:
-        return 1 + 1 + 1
+        return 1 + 1 + 1 + 4 + 4
 
     @classmethod
     def from_buffer(cls, buffer: bytes) -> Metadata:
         return Metadata(
-            stream_ready=np.frombuffer(buffer[0:1], dtype=np.uint8)[0],
+            is_sender_ready=np.frombuffer(buffer[0:1], dtype=np.uint8)[0],
             calibration_ok=np.frombuffer(buffer[1:2], dtype=np.uint8)[0],
-            active_data_cnt=np.frombuffer(buffer[2:3], dtype=np.uint8)[0],
+            is_receiver_ready=np.frombuffer(buffer[2:3], dtype=np.uint8)[0],
+            head=np.frombuffer(buffer[3:7], dtype=np.int32)[0],
+            tail=np.frombuffer(buffer[7:11], dtype=np.int32)[0],
         )
 
 
@@ -201,10 +205,10 @@ class GazeData:
     right_validity: np.int8
     left_pupil_diameter: np.float32
     right_pupil_diameter: np.float32
-    left_openness_validity: np.int8 = 0
-    right_openness_validity: np.int8 = 0
-    left_openness: np.float32 = 0.0
-    right_openness: np.float32 = 0.0
+    left_openness_validity: np.int8 = np.int8(0)
+    right_openness_validity: np.int8 = np.int8(0)
+    left_openness: np.float32 = np.float32(0.0)
+    right_openness: np.float32 = np.float32(0.0)
 
     def get_conversion_str(self) -> str:
         return "<q10f2B2f2B2f"
