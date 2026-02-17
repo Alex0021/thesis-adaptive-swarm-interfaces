@@ -602,7 +602,7 @@ class ExperimentManagerWindow:
             "00:00", alignment=Qt.AlignmentFlag.AlignRight
         )
         self._ellapsed_time_label.setStyleSheet("font-size: 20px; font-weight: bold;")
-        timer_layout.addWidget(self._ellapsed_time_label,1)
+        timer_layout.addWidget(self._ellapsed_time_label, 1)
         self.start_ellapsed_time_button = QPushButton("Start timer")
         self.start_ellapsed_time_button.setMinimumHeight(30)
         self.start_ellapsed_time_button.clicked.connect(self._start_experiment_timer)
@@ -623,7 +623,6 @@ class ExperimentManagerWindow:
         self._next_state_btn.setEnabled(False)
         buttons_layout.addWidget(self._next_state_btn, 1)
 
-
     def start(self):
         self._flash_visible = True
         self._experiment_status_update_timer = QTimer()
@@ -632,9 +631,9 @@ class ExperimentManagerWindow:
         )
         self._experiment_status_update_timer.start(500)
 
-    #================
+    # ================
     # Timer callbacks
-    #================
+    # ================
 
     def _update_ellapsed_time(self):
         if self.experiment_manager._duration is not None:
@@ -706,9 +705,9 @@ class ExperimentManagerWindow:
             self._title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
         self._flash_visible = not self._flash_visible
 
-    #==================
+    # ==================
     # BUTTONS callbacks
-    #==================
+    # ==================
 
     def _start_experiment_timer(self):
         if self.experiment_manager._start_time is None:
