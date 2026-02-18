@@ -9,13 +9,13 @@ from PyQt6.QtWidgets import QApplication
 
 import workload_inference.data_structures as dts
 from workload_inference.experiment import ExperimentManager, ExperimentManagerWindow
+from workload_inference.generator import FakeGazeGenerator
 from workload_inference.processing import DataProcessor
 from workload_inference.py_receiver import (
     SMReceiver,
     SMReceiverCircularBuffer,
     ZMQReceiver,
 )
-from workload_inference.generator import FakeGazeGenerator
 
 
 def setup_logging():
@@ -49,27 +49,31 @@ def main():
         # fake_data_generator.start()
         experiment_window.attach_listeners()
         experiment_manager.gaze_receiver.start()
+        experiment_manager._nback_receiver.start()
         experiment_window.start()
 
-    # receiver = ZMQReceiver()
-    # def print_drone_data(datas: list[dts.DroneData]):
-    #     for d in datas:
-    #         pos = np.array([d.position_x, d.position_y, d.position_z])
-    #         print(pos)
+        # receiver = ZMQReceiver()
+        # def print_drone_data(datas: list[dts.DroneData]):
+        #     for d in datas:
+        #         pos = np.array([d.position_x, d.position_y, d.position_z])
+        #         print(pos)
 
-    # receiver = SMReceiver(
-    #     mmap_name=dts.DRONE_DATA_BLOCK_NAME,
-    #     datatype=dts.DroneData,
-    #     update_rate=2,
-    #     listeners=[print_drone_data],
-    #     block_count=dts.DRONE_COUNT,
-    # )
-    # receiver =  SMReceiverCircularBuffer(
-    #     data_mmap_name=dts.GAZE_DATA_BLOCK_NAME,
-    #     metadata_mmap_name=dts.METADATA_BLOCK_NAME,
-    #     datatype=dts.GazeData,
-    #     buffer_size=dts.GAZE_DATA_BLOCK_CNT
-    # )
+        # receiver = SMReceiver(
+        #     mmap_name=dts.DRONE_DATA_BLOCK_NAME,
+        #     datatype=dts.DroneData,
+        #     update_rate=2,
+        #     listeners=[print_drone_data],
+        #     block_count=dts.DRONE_COUNT,
+        # )
+        # receiver = SMReceiverCircularBuffer(
+        #     data_mmap_name="TobiiUnityGazeData",
+        #     mmap_name="TobiiUnityMetadata",
+        #     datatype=dts.GazeData,
+        #     update_rate=60,
+        #     block_count=100,
+        #     with_timestamps=True,
+        # )
+        # receiver.start()
     # receiver.register_listener(experiment_manager.datas_callback)
     # # receiver.register_listener(data_processor.datas_callback)
     # receiver.register_listener(visualizer.canvas.datas_callback)

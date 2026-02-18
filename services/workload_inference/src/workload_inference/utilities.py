@@ -132,7 +132,7 @@ class ExperimentDataWriter:
         for d in datas:
             self._queue.put(d)
 
-    def new_file(self, filepath: Path) -> None:
+    def new_file(self, filepath: Path, safe: bool = True) -> None:
         """Set the output file path. Automatically stops the writer
         if it is running and flushes remaining data."""
         if self._running:
@@ -141,6 +141,14 @@ class ExperimentDataWriter:
         self.filepath = filepath
         # Ensure parent dir exists
         self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        if safe and self.filepath.exists():
+            new_filename = self.filepath.stem + "_newer" + self.filepath.suffix
+            self._logger.warning(
+                "File '%s' already exists, renaming new file to '%s'",
+                self.filepath,
+                new_filename,
+            )
+            self.filepath = self.filepath.parent / new_filename
         self._filestream = open(self.filepath, "w", encoding=self._encoding)
         if self._header:
             self._filestream.write(",".join(self._header) + "\n")
