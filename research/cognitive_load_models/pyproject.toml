@@ -15,7 +15,8 @@ dependencies = [
   "matplotlib",
   "seaborn",
   "jupyter",
-  "tqdm"
+  "tqdm",
+  "pywavelets>=1.9.0",
 ]
 
 [tool.uv]
