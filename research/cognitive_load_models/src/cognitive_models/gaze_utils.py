@@ -1,6 +1,6 @@
-import pandas as pd
 import numpy as np
-from scipy.signal import firwin, filtfilt
+import pandas as pd
+from scipy.signal import filtfilt, firwin
 
 CUTOFF_FREQ = 10  # Hz
 FS = 60  # Hz
@@ -8,12 +8,25 @@ TAPS = 5
 
 
 def detect_gaps_and_blinks(
-    df, confidence_threshold=0.95, blink_threshold_range=(100, 300)
-):
-    if not all([col in df.columns for col in ["timestamp", "pupil_confidence"]]):
+    df: pd.DataFrame,
+    confidence_threshold: float = 0.95,
+    blink_threshold_range: tuple[int, int] = (100, 300),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Detect gaps and blinks in the eye-tracking data based on pupil confidence values.
+
+    Args:
+        df (pd.DataFrame): Dataframe with at least ['timestamp_sec', 'pupil_confidence'] columns.
+        confidence_threshold (float): Threshold below which pupil confidence is considered low.
+        blink_threshold_range (tuple[int, int]): Duration range that represents blinks in milliseconds.
+
+    Returns:
+        gaps_df,blinks_df (tuple[pd.DataFrame, pd.DataFrame]):
+    """
+    if not all([col in df.columns for col in ["timestamp_sec", "pupil_confidence"]]):
         raise ValueError("DataFrame must contain 'pupil_confidence' column")
 
-    low_confidence_df = df[["timestamp", "pupil_confidence"]].copy()
+    low_confidence_df = df[["timestamp_sec", "pupil_confidence"]].copy()
     low_confidence_df["low_confidence"] = (
         low_confidence_df["pupil_confidence"] < confidence_threshold
     )
@@ -25,13 +38,13 @@ def detect_gaps_and_blinks(
     low_confidence_df_gfoup = low_confidence_df.groupby("group").agg(
         {
             "low_confidence": ["first", "count"],
-            "timestamp": ["min", "max"],
+            "timestamp_sec": ["min", "max"],
             "id": ["min", "max"],
         }
     )
     low_confidence_df_gfoup["duration_ms"] = (
-        low_confidence_df_gfoup["timestamp"]["max"]
-        - low_confidence_df_gfoup["timestamp"]["min"]
+        low_confidence_df_gfoup["timestamp_sec"]["max"]
+        - low_confidence_df_gfoup["timestamp_sec"]["min"]
     ) * 1000
 
     # Gaps
@@ -39,8 +52,8 @@ def detect_gaps_and_blinks(
         low_confidence_df_gfoup["low_confidence"]["first"]
         & (low_confidence_df_gfoup["duration_ms"] < blink_threshold_range[0])
     ]
-    gaps_to_fill_df["start_timestamp"] = gaps_to_fill_df["timestamp"]["min"]
-    gaps_to_fill_df["stop_timestamp"] = gaps_to_fill_df["timestamp"]["max"]
+    gaps_to_fill_df["start_timestamp"] = gaps_to_fill_df["timestamp_sec"]["min"]
+    gaps_to_fill_df["stop_timestamp"] = gaps_to_fill_df["timestamp_sec"]["max"]
     gaps_to_fill_df["start_id"] = gaps_to_fill_df["id"]["min"].astype(int)
     gaps_to_fill_df["stop_id"] = gaps_to_fill_df["id"]["max"].astype(int)
     gaps_to_fill_df = gaps_to_fill_df[
@@ -56,8 +69,8 @@ def detect_gaps_and_blinks(
             & (low_confidence_df_gfoup["duration_ms"] <= blink_threshold_range[1])
         )
     ].copy()
-    custom_blinks_df["start_timestamp"] = custom_blinks_df["timestamp"]["min"]
-    custom_blinks_df["stop_timestamp"] = custom_blinks_df["timestamp"]["max"]
+    custom_blinks_df["start_timestamp"] = custom_blinks_df["timestamp_sec"]["min"]
+    custom_blinks_df["stop_timestamp"] = custom_blinks_df["timestamp_sec"]["max"]
     custom_blinks_df["start_id"] = custom_blinks_df["id"]["min"]
     custom_blinks_df["stop_id"] = custom_blinks_df["id"]["max"]
     custom_blinks_df = custom_blinks_df[
@@ -68,16 +81,18 @@ def detect_gaps_and_blinks(
     return gaps_to_fill_df, custom_blinks_df
 
 
-def calculate_gaze_angular_delta(df):
+def calculate_gaze_angular_delta(df: pd.DataFrame) -> pd.Series:
     """
     Make sur the dataframe has the following columns:
-    'timestamp', 'gaze_point_3d_x', 'gaze_point_3d_y', 'gaze_point_3d_z'
+    'timestamp_sec', 'gaze_point_3d_x', 'gaze_point_3d_y', 'gaze_point_3d_z'
 
+    Returns:
+        pd.Series: A series containing the gaze angular delta in degrees.
     """
     if not all(
         col in df.columns
         for col in [
-            "timestamp",
+            "timestamp_sec",
             "gaze_point_3d_x",
             "gaze_point_3d_y",
             "gaze_point_3d_z",
@@ -85,10 +100,10 @@ def calculate_gaze_angular_delta(df):
     ):
         raise ValueError(
             "DataFrame must contain the following columns: "
-            "'timestamp', 'gaze_point_3d_x', 'gaze_point_3d_y', 'gaze_point_3d_z'"
+            "'timestamp_sec', 'gaze_point_3d_x', 'gaze_point_3d_y', 'gaze_point_3d_z'"
         )
     gaze_angular_data = df[
-        ["timestamp", "gaze_point_3d_x", "gaze_point_3d_y", "gaze_point_3d_z"]
+        ["timestamp_sec", "gaze_point_3d_x", "gaze_point_3d_y", "gaze_point_3d_z"]
     ].copy()
     gaze_angular_data["prev_gaze_point_3d_x"] = gaze_angular_data[
         "gaze_point_3d_x"
@@ -132,18 +147,31 @@ def calculate_gaze_angular_delta(df):
 
 
 def calculate_angular_velocity(
-    gaze_df, absolute=True, LIMITS=(-1000, 1000), filtered=True
+    gaze_df: pd.DataFrame,
+    absolute: bool = True,
+    LIMITS: tuple[int, int] = (-1000, 1000),
+    filtered: bool = True,
 ):
+    """
+    Make sure the dataframe has the following columns: 'timestamp_sec', 'gaze_angle_delta_deg'
+
+    :param gaze_df: DataFrame containing gaze angle delta in degrees with timestamps.
+    :param absolute: If True, return absolute angular velocity values.
+    :param LIMITS: Tuple of (min, max) limits for angular velocity values.
+    :param filtered: If True, apply a FIR filter to the angular velocity data.
+    :raises ValueError: If the required columns are not present in gaze_df.
+    :return: Series containing angular velocity values.
+    """
     if "gaze_angle_delta_deg" not in gaze_df.columns:
         raise ValueError("gaze_df must contain 'gaze_angle_delta_deg' column")
 
-    gaze_angular_data = gaze_df[["timestamp", "gaze_angle_delta_deg"]].copy()
+    gaze_angular_data = gaze_df[["timestamp_sec", "gaze_angle_delta_deg"]].copy()
     gaze_angular_data["prev_gaze_angle_delta_deg"] = gaze_angular_data[
         "gaze_angle_delta_deg"
     ].shift(1)
     gaze_angular_data["delta_time"] = gaze_angular_data[
-        "timestamp"
-    ] - gaze_angular_data["timestamp"].shift(1)
+        "timestamp_sec"
+    ] - gaze_angular_data["timestamp_sec"].shift(1)
 
     def angular_velocity(row):
         if pd.isna(row["prev_gaze_angle_delta_deg"]) or pd.isna(
@@ -169,7 +197,7 @@ def calculate_angular_velocity(
         return filtered_data
 
     if filtered:
-        gaze_angular_data["gaze_angular_velocity_filtered"] = apply_fir_filter(
+        gaze_angular_data["gaze_angular_velocity"] = apply_fir_filter(
             gaze_angular_data, "gaze_angular_velocity", CUTOFF_FREQ, FS, numtaps=TAPS
         )
 
@@ -177,15 +205,33 @@ def calculate_angular_velocity(
 
 
 def calculate_fixations_saccades(
-    eye_df, ivt_threshold, min_fixation_duration=55, min_datapoints=2
+    eye_df: pd.DataFrame,
+    ivt_threshold: float,
+    min_fixation_duration: int = 55,
+    min_datapoints: int = 2,
+    verbose: bool = True,
 ):
+    """
+    Make sure the dataframe has the following columns: 'timestamp_sec', 'gaze_angular_velocity'
+
+    :param eye_df: DataFrame containing eye-tracking data with required columns.
+    :param ivt_threshold: Threshold for identifying saccades based on angular velocity.
+    :param min_fixation_duration: Minimum duration in milliseconds for a fixation to be valid.
+    :param min_datapoints: Minimum number of consecutive samples for a fixation or saccade to be valid.
+
+    :rtype: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+    :returns eye_df, fixations_df, saccades_df:
+    """
     eye_df = eye_df.copy()
-    eye_df["saccade"] = eye_df["gaze_angular_velocity_filtered"] > ivt_threshold
-    eye_df["fixation"] = ~eye_df["saccade"]
-    eye_df["transition"] = eye_df["saccade"] != eye_df["saccade"].shift(1)
-    print(
-        f"Found {eye_df['transition'].sum()} transitions between saccades and fixations"
+    eye_df["saccade"] = (eye_df["gaze_angular_velocity"] > ivt_threshold) & (
+        ~eye_df["is_blink"]
     )
+    eye_df["fixation"] = ~eye_df["saccade"] & ~eye_df["is_blink"]
+    eye_df["transition"] = eye_df["saccade"] != eye_df["saccade"].shift(1)
+    if verbose:
+        print(
+            f"Found {eye_df['transition'].sum()} transitions between saccades and fixations"
+        )
 
     # Min duration of fixations
     min_fixation_n_datapoints = int(np.ceil(min_fixation_duration / (1000 / FS)))
@@ -196,9 +242,10 @@ def calculate_fixations_saccades(
     fixation_groups = grouped_transitions.agg(
         {"fixation": ["first", "count"], "id": ["min", "max"]}
     )
-    print(
-        f"Will mark {((fixation_groups[('fixation', 'count')] < min_fixation_n_datapoints) & (fixation_groups[('fixation', 'first')])).sum()} short fixations as saccades"
-    )
+    if verbose:
+        print(
+            f"Will mark {((fixation_groups[('fixation', 'count')] < min_fixation_n_datapoints) & (fixation_groups[('fixation', 'first')])).sum()} short fixations as saccades"
+        )
     for idx, group in fixation_groups.iterrows():
         if (
             group["fixation"]["count"] < min_fixation_n_datapoints
@@ -236,17 +283,24 @@ def calculate_fixations_saccades(
 
     grouped_transitions = eye_df.groupby(eye_df["transition"].cumsum())
     for idx, group in grouped_transitions:
+        if group["is_blink"].any():
+            continue
         if group["saccade"].iloc[0]:
             rows_saccades.append(
                 {
                     "start_id": group["id"].iloc[0],
                     "stop_id": group["id"].iloc[-1],
-                    "start_timestamp": group["timestamp"].iloc[0],
-                    "stop_timestamp": group["timestamp"].iloc[-1],
+                    "start_timestamp": group["timestamp_sec"].iloc[0],
+                    "stop_timestamp": group["timestamp_sec"].iloc[-1],
                     "duration_ms": (
-                        group["timestamp"].iloc[-1] - group["timestamp"].iloc[0]
+                        group["timestamp_sec"].iloc[-1] - group["timestamp_sec"].iloc[0]
                     )
                     * 1000,
+                    "amplitude_deg": abs(
+                        group["gaze_angle_delta_deg"].iloc[-1]
+                        - group["gaze_angle_delta_deg"].iloc[0]
+                    ),
+                    "peak_velocity": group["gaze_angular_velocity"].max(),
                 }
             )
         else:
@@ -261,10 +315,10 @@ def calculate_fixations_saccades(
                 {
                     "start_id": group["id"].iloc[0],
                     "stop_id": group["id"].iloc[-1],
-                    "start_timestamp": group["timestamp"].iloc[0],
-                    "stop_timestamp": group["timestamp"].iloc[-1],
+                    "start_timestamp": group["timestamp_sec"].iloc[0],
+                    "stop_timestamp": group["timestamp_sec"].iloc[-1],
                     "duration_ms": (
-                        group["timestamp"].iloc[-1] - group["timestamp"].iloc[0]
+                        group["timestamp_sec"].iloc[-1] - group["timestamp_sec"].iloc[0]
                     )
                     * 1000,
                     "x": mean_x,
