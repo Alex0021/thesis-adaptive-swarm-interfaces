@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import pywt
 
+EPSILON = 1e-10
+
 
 def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
     """
@@ -23,6 +25,9 @@ def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
     # Normalize
     cD_H /= np.sqrt(2**hif)
     cD_L /= np.sqrt(2**lof)
+
+    # Check for zero values in cD_H to avoid division by zero
+    cD_H[cD_H == 0.0] = EPSILON
 
     cD_LH = cD_L / cD_H[[i for i in range(len(cD_H)) if i % (2 ** (lof - hif)) == 0]]
 
