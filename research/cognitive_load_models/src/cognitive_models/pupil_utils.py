@@ -1,8 +1,12 @@
 import numpy as np
 import pandas as pd
 import pywt
+from scipy.signal import savgol_coeffs
 
 EPSILON = 1e-10
+
+LF_COEFFS = None
+VLF_COEFFS = None
 
 
 def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
@@ -18,6 +22,11 @@ def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
     max_level = pywt.dwt_max_level(len(data), w.dec_len)
 
     hif, lof = 1, int(max_level / 2)
+
+    if hif == lof:
+        print(
+            "Warning: hif and lof are equal, which may lead to issues in LHIPA computation"
+        )
 
     cD_H = pywt.downcoef("d", data, w, level=hif, mode="per")
     cD_L = pywt.downcoef("d", data, w, level=lof, mode="per")
@@ -54,3 +63,45 @@ def modmax(coeffs):
         ((abs_coeffs >= lcoeffs) & (abs_coeffs >= rcoeffs))
         & ((abs_coeffs > lcoeffs) | (abs_coeffs > rcoeffs)),
     )
+
+
+def ripa2(
+    window_df: pd.DataFrame, VLF: tuple[int, int], LF: tuple[int, int], D: int = 1
+) -> float:
+    """
+    Compute the RIPA2 value which is the newest IPA measure to be used online.
+
+    Refer to this paper for explainations: https://doi.org/10.3390/jemr18060070
+
+    :param window_df: Must contain a 'pupil_diameter_mm' column
+    :param (M_VLF,N_VLF): The filter length (M) and polynomial order (N) for the VLF filter.
+    :param (M_LF,N_LF): The filter length (M) and polynomial order (N) for the LF filter.
+    :param D: The order of the derivative to compute (default is 1 for first derivative).
+    :return ripa2_mean: The computed RIPA2 value (mean over the valid window).
+    """
+    global LF_COEFFS, VLF_COEFFS
+    # 1- Compute the S-G filter coefficients if needed
+    if LF_COEFFS is None or VLF_COEFFS is None:
+        VLF_window_length = VLF[0] * 2 + 1
+        LF_window_length = LF[0] * 2 + 1
+        VLF_COEFFS = savgol_coeffs(
+            window_length=VLF_window_length, polyorder=VLF[1], deriv=D
+        )
+        LF_COEFFS = savgol_coeffs(
+            window_length=LF_window_length, polyorder=LF[1], deriv=D
+        )
+
+    # 2- Get the filtered samples that fit the window length (centered)
+    pupil_data = window_df["pupil_diameter_mm"].to_numpy()
+    VLF_filtered = np.convolve(pupil_data, VLF_COEFFS, mode="valid")
+    LF_filtered = np.convolve(pupil_data, LF_COEFFS, mode="valid")
+
+    # for LF filtered, only keep matching samples with VLF filtered (centered)
+    delta = VLF[0] - LF[0]
+    LF_filtered = LF_filtered[delta : len(LF_filtered) - delta]
+
+    # 3- Compute the RIPA2 value
+    ripa2 = np.clip(LF_filtered**2 - VLF_filtered**2, 0, 1.5)
+
+    # 4- For now, return the mean value of the RIPA2
+    return np.mean(ripa2)

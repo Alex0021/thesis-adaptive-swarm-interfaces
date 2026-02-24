@@ -4,7 +4,7 @@ from typing import Any
 import pandas as pd
 
 from .gaze_utils import calculate_fixations_saccades
-from .pupil_utils import lhipa
+from .pupil_utils import lhipa, ripa2
 
 
 def extract_window_features(
@@ -69,6 +69,7 @@ def extract_window_features(
             ).mean()
 
     # 5- Pupil related features
-    features["pupil_lhipa"] = lhipa(window_df)
+    features["pupil_lhipa"] = lhipa(window_df, wavelet_type="sym8")
+    features["pupil_ripa2"] = ripa2(window_df, VLF=(98, 2), LF=(13, 4), D=1)
 
     return features
