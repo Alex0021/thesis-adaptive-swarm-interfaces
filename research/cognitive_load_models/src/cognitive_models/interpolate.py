@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 
+PUPIL_CONFIDENCE_THRESHOLD = 0.95
+
 
 def merge_colet_eye_data(
     raw_gaze_df: pd.DataFrame, raw_eye_df: pd.DataFrame, f_des: int = 60
@@ -15,44 +17,64 @@ def merge_colet_eye_data(
     :return: merge dataframe
     """
     # First keep only the best pupil meausurement for each timestamp_sec
-    # eye_df_best = raw_eye_df.groupby(
-    #     ["pupil_timestamp", "eye_id"], as_index=False
-    # ).apply(lambda x: x.loc[x["confidence"].idxmax()])
-    # eye_df_best.reset_index(drop=True, inplace=True)
-    # eye_df_best.drop(columns=["norm_pos_x", "norm_pos_y"], inplace=True)
-    # eye_df_best.rename(
-    #     columns={"diameter": "pupil_diameter_mm", "confidence": "pupil_confidence"},
-    #     inplace=True,
-    # )
+    pupil_df_left = raw_eye_df[
+        (raw_eye_df["eye_id"] == 0) & raw_eye_df["diameter_mm"].isna()
+    ]
+    pupil_df_right = raw_eye_df[
+        (raw_eye_df["eye_id"] == 1) & raw_eye_df["diameter_mm"].isna()
+    ]
+    # Keep only the one that has generally the best confidence value overall
+    num_good_left = (pupil_df_left["confidence_px"] > PUPIL_CONFIDENCE_THRESHOLD).sum()
+    num_good_right = (
+        pupil_df_right["confidence_px"] > PUPIL_CONFIDENCE_THRESHOLD
+    ).sum()
+    if num_good_left > num_good_right:
+        pupil_df_best = pupil_df_left
+    else:
+        pupil_df_best = pupil_df_right
+    pupil_df_best.reset_index(drop=True, inplace=True)
+    pupil_df_best.drop(
+        columns=[
+            c
+            for c in pupil_df_best.columns
+            if c.startswith("confidence_mm")
+            or c.startswith("diameter_mm")
+            or c.startswith("eye_id_")
+        ],
+        inplace=True,
+    )
+    # Change confidence to 0 for values out of range
+    pupil_df_best.loc[pupil_df_best["diameter_px"] < 15, "confidence_px"] = 0
+    pupil_df_best.loc[pupil_df_best["diameter_px"] > 100, "confidence_px"] = 0
 
     # Merge the gaze and pupil dataframes on the timestamp_sec column
-    gaze_start_time = raw_gaze_df["gaze_timestamp"].min()
+    pupil_start_time = raw_gaze_df["gaze_timestamp"].min()
     merged_df = pd.merge_asof(
+        pupil_df_best.sort_values("pupil_timestamp"),
         raw_gaze_df.sort_values("gaze_timestamp"),
-        eye_df_best.sort_values("pupil_timestamp"),
-        left_on="gaze_timestamp",
-        right_on="pupil_timestamp",
+        left_on="pupil_timestamp",
+        right_on="gaze_timestamp",
         direction="nearest",
-        tolerance=1.0 / 240 * 2,
+        tolerance=1.0 / 120 * 2,
     )  # tolerance in ms
     print(
-        f"There are {merged_df[merged_df.pupil_confidence.isna()].index.size} non matching timestamp_sec within the limits"
+        f"There are {merged_df[merged_df.confidence.isna()].index.size} non matching timestamp_sec within the limits"
     )
     # Since only one value, drop the row
     merged_df_clean = merged_df.dropna()
     # Let's reindex the dataframe using timestamp_sec starting from 0 and dropping the original timestamp_sec columns
     merged_df_clean["timestamp_sec"] = (
-        merged_df_clean["gaze_timestamp"] - gaze_start_time
+        merged_df_clean["pupil_timestamp"] - pupil_start_time
     )
     merged_df_clean.drop(columns=["gaze_timestamp", "pupil_timestamp"], inplace=True)
     merged_df_clean = (
         merged_df_clean.groupby(
-            (merged_df_clean["timestamp_sec"] // (1.0 / 240 / 2)).astype(int)
+            (merged_df_clean["timestamp_sec"] // (1.0 / 120 / 2)).astype(int)
         )
         .mean()
         .reset_index(drop=True)
     )
-    print(f"Final merged dataset has {merged_df_clean.shape[0]} records at 240 Hz")
+    print(f"Final merged dataset has {merged_df_clean.shape[0]} records at 120 Hz")
 
     # Then adjust sampling frequency to the desired frequency
     T = f"{1000 / f_des:.2f}ms"
@@ -67,11 +89,74 @@ def merge_colet_eye_data(
     merged_df_clean["timestamp_sec"] = merged_df_clean[
         "timestamp_sec"
     ].dt.total_seconds()  # Convert back to seconds
+    # Only keep thw worse confidence between gaze and pupil
+    merged_df_clean["confidence"] = merged_df_clean[
+        ["confidence_px", "confidence"]
+    ].min(axis=1)
+    merged_df_clean.drop(columns=["confidence_px"], inplace=True)
+    merged_df_clean.rename(columns={"diameter_px": "pupil_diameter_px"}, inplace=True)
+
     print(
         f"Final merged and resampled dataset has {merged_df_clean.shape[0]} records at 60 Hz"
     )
 
     return merged_df_clean
+
+
+def interpolate_pupil_data(
+    eye_df: pd.DataFrame,
+    gaps_df: pd.DataFrame,
+    column: str = "pupil_diameter_px",
+    max_gap: int = 300,
+) -> pd.DataFrame:
+    return interpolate_eye_data(eye_df, gaps_df, columns=[column], max_gap=max_gap)
+
+
+def interpolate_eye_data(
+    eye_df: pd.DataFrame, gaps_df: pd.DataFrame, columns: list[str], max_gap: int
+) -> pd.DataFrame:
+    interpolated_df = eye_df[["timestamp_sec"] + columns].copy()
+    interpolated_df["timestamp_sec"] = pd.to_timedelta(
+        interpolated_df["timestamp_sec"], unit="s"
+    )
+    interpolated_df.set_index("timestamp_sec", inplace=True)
+    interpolated_df = interpolated_df.resample("16.67ms").interpolate(method="slinear")
+    interpolated_df.reset_index(inplace=True)
+    interpolated_df["timestamp_sec"] = interpolated_df[
+        "timestamp_sec"
+    ].dt.total_seconds()
+    # Remove zones that exceed the interpolation threshold
+    for _, row in gaps_df[gaps_df["duration_ms"] >= max_gap].iterrows():
+        interpolated_df = interpolated_df[
+            (interpolated_df["timestamp_sec"] < row["start_timestamp"])
+            | (interpolated_df["timestamp_sec"] > row["stop_timestamp"])
+        ]
+    interpolated_df["is_interpolated"] = ~interpolated_df["timestamp_sec"].isin(
+        eye_df["timestamp_sec"]
+    )
+    interpolated_df.reset_index(drop=True, inplace=True)
+
+    return interpolated_df
+
+
+def interpolate_gaze_angle(
+    eye_df: pd.DataFrame,
+    gaps_df: pd.DataFrame,
+    columns: list[str] = ["gaze_angle_delta_deg"],
+    max_gap: int = 300,
+) -> pd.DataFrame:
+    interpolated_df = interpolate_eye_data(
+        eye_df, gaps_df, columns=columns, max_gap=max_gap
+    )
+    # Also remove blinks from the interpolated gaze angle dataframe
+    for _, row in gaps_df[gaps_df["is_blink"]].iterrows():
+        interpolated_df = interpolated_df[
+            (interpolated_df["timestamp_sec"] < row["start_timestamp"])
+            | (interpolated_df["timestamp_sec"] > row["stop_timestamp"])
+        ]
+    interpolated_df.reset_index(drop=True, inplace=True)
+
+    return interpolated_df
 
 
 def interpolate_blinks(

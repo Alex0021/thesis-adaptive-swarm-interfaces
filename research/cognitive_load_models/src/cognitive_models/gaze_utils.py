@@ -11,24 +11,22 @@ def detect_gaps_and_blinks(
     df: pd.DataFrame,
     confidence_threshold: float = 0.95,
     blink_threshold_range: tuple[int, int] = (100, 300),
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """
-    Detect gaps and blinks in the eye-tracking data based on pupil confidence values.
+    Detect low confidence gaps and blinks in the eye-tracking data.
 
-    Args:
-        df (pd.DataFrame): Dataframe with at least ['timestamp_sec', 'pupil_confidence'] columns.
-        confidence_threshold (float): Threshold below which pupil confidence is considered low.
-        blink_threshold_range (tuple[int, int]): Duration range that represents blinks in milliseconds.
-
-    Returns:
-        gaps_df,blinks_df (tuple[pd.DataFrame, pd.DataFrame]):
+    :param df: DataFrame containing eye-tracking data with 'timestamp_sec' and 'confidence' columns.
+    :param confidence_threshold: The threshold below which confidence is considered low.
+    :param blink_threshold_range: The range of durations (in milliseconds) that are considered blinks.
+    :raises ValueError: If the DataFrame does not contain the required columns.
+    :return gaps: A DataFrame with information about detected gaps and blinks.
     """
-    if not all([col in df.columns for col in ["timestamp_sec", "pupil_confidence"]]):
-        raise ValueError("DataFrame must contain 'pupil_confidence' column")
+    if not all([col in df.columns for col in ["timestamp_sec", "confidence"]]):
+        raise ValueError("DataFrame must contain 'confidence' column")
 
-    low_confidence_df = df[["timestamp_sec", "pupil_confidence"]].copy()
+    low_confidence_df = df[["timestamp_sec", "confidence"]].copy()
     low_confidence_df["low_confidence"] = (
-        low_confidence_df["pupil_confidence"] < confidence_threshold
+        low_confidence_df["confidence"] < confidence_threshold
     )
     low_confidence_df["transition"] = low_confidence_df[
         "low_confidence"
@@ -50,7 +48,6 @@ def detect_gaps_and_blinks(
     # Gaps
     gaps_to_fill_df = low_confidence_df_gfoup[
         low_confidence_df_gfoup["low_confidence"]["first"]
-        & (low_confidence_df_gfoup["duration_ms"] < blink_threshold_range[0])
     ]
     gaps_to_fill_df["start_timestamp"] = gaps_to_fill_df["timestamp_sec"]["min"]
     gaps_to_fill_df["stop_timestamp"] = gaps_to_fill_df["timestamp_sec"]["max"]
@@ -62,23 +59,14 @@ def detect_gaps_and_blinks(
     gaps_to_fill_df = gaps_to_fill_df.droplevel(level=1, axis=1)
 
     # Blinks
-    custom_blinks_df = low_confidence_df_gfoup[
-        (
-            low_confidence_df_gfoup["low_confidence"]["first"]
-            & (low_confidence_df_gfoup["duration_ms"] >= blink_threshold_range[0])
-            & (low_confidence_df_gfoup["duration_ms"] <= blink_threshold_range[1])
-        )
-    ].copy()
-    custom_blinks_df["start_timestamp"] = custom_blinks_df["timestamp_sec"]["min"]
-    custom_blinks_df["stop_timestamp"] = custom_blinks_df["timestamp_sec"]["max"]
-    custom_blinks_df["start_id"] = custom_blinks_df["id"]["min"]
-    custom_blinks_df["stop_id"] = custom_blinks_df["id"]["max"]
-    custom_blinks_df = custom_blinks_df[
-        ["start_id", "stop_id", "start_timestamp", "stop_timestamp", "duration_ms"]
-    ].reset_index(drop=True)
-    custom_blinks_df = custom_blinks_df.droplevel(level=1, axis=1)
+    gaps_to_fill_df["is_blink"] = (
+        gaps_to_fill_df["duration_ms"] >= blink_threshold_range[0]
+    )
+    gaps_to_fill_df["is_blink"] &= (
+        gaps_to_fill_df["duration_ms"] <= blink_threshold_range[1]
+    )
 
-    return gaps_to_fill_df, custom_blinks_df
+    return gaps_to_fill_df
 
 
 def calculate_gaze_angular_delta(df: pd.DataFrame) -> pd.Series:
@@ -206,6 +194,7 @@ def calculate_angular_velocity(
 
 def calculate_fixations_saccades(
     eye_df: pd.DataFrame,
+    gaps_df: pd.DataFrame,
     ivt_threshold: float,
     min_fixation_duration: int = 55,
     min_datapoints: int = 2,
@@ -215,6 +204,7 @@ def calculate_fixations_saccades(
     Make sure the dataframe has the following columns: 'timestamp_sec', 'gaze_angular_velocity'
 
     :param eye_df: DataFrame containing eye-tracking data with required columns.
+    :param gaps_df: DataFrame containing information about gaps in the data.
     :param ivt_threshold: Threshold for identifying saccades based on angular velocity.
     :param min_fixation_duration: Minimum duration in milliseconds for a fixation to be valid.
     :param min_datapoints: Minimum number of consecutive samples for a fixation or saccade to be valid.
@@ -223,10 +213,8 @@ def calculate_fixations_saccades(
     :returns eye_df, fixations_df, saccades_df:
     """
     eye_df = eye_df.copy()
-    eye_df["saccade"] = (eye_df["gaze_angular_velocity"] > ivt_threshold) & (
-        ~eye_df["is_blink"]
-    )
-    eye_df["fixation"] = ~eye_df["saccade"] & ~eye_df["is_blink"]
+    eye_df["saccade"] = eye_df["gaze_angular_velocity"] > ivt_threshold
+    eye_df["fixation"] = ~eye_df["saccade"]
     eye_df["transition"] = eye_df["saccade"] != eye_df["saccade"].shift(1)
     if verbose:
         print(
@@ -283,8 +271,6 @@ def calculate_fixations_saccades(
 
     grouped_transitions = eye_df.groupby(eye_df["transition"].cumsum())
     for idx, group in grouped_transitions:
-        if group["is_blink"].any():
-            continue
         if group["saccade"].iloc[0]:
             rows_saccades.append(
                 {
@@ -328,5 +314,25 @@ def calculate_fixations_saccades(
             )
     saccades_df = pd.DataFrame(rows_saccades)
     fixations_df = pd.DataFrame(rows_fixations)
+
+    for _, row in gaps_df[gaps_df["is_blink"]].iterrows():
+        condition = (saccades_df["start_timestamp"] >= row["start_timestamp"]) & (
+            saccades_df["stop_timestamp"] <= row["start_timestamp"]
+        )
+        if condition.any():
+            saccades_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
+            saccades_df.loc[condition, "duration_ms"] = (
+                saccades_df.loc[condition, "stop_timestamp"]
+                - saccades_df.loc[condition, "start_timestamp"]
+            ) * 1000
+        condition = (fixations_df["start_timestamp"] >= row["start_timestamp"]) & (
+            fixations_df["stop_timestamp"] <= row["start_timestamp"]
+        )
+        if condition.any():
+            fixations_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
+            fixations_df.loc[condition, "duration_ms"] = (
+                fixations_df.loc[condition, "stop_timestamp"]
+                - fixations_df.loc[condition, "start_timestamp"]
+            ) * 1000
 
     return eye_df, fixations_df, saccades_df

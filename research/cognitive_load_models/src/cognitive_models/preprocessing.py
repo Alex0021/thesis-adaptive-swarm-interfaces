@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from cognitive_models.pupil_utils import detect_outliers
+
 from .gaze_utils import (
     calculate_angular_velocity,
     calculate_gaze_angular_delta,
@@ -10,7 +12,9 @@ from .gaze_utils import (
 )
 from .interpolate import (
     interpolate_blinks,
+    interpolate_gaze_angle,
     interpolate_missing_gaze,
+    interpolate_pupil_data,
     merge_colet_eye_data,
 )
 
@@ -21,6 +25,10 @@ GAZE_FILE_PATTERN = "*gaze.csv"
 PUPIL_FILE_PATTERN = "*pupil.csv"
 BLINK_FILE_PATTERN = "*blinks.csv"
 ANNOTATION_FILENAME = "annotations.csv"
+
+CONFIDENCE_THRESHOLD = 0.95
+DURATION_THRESHOLD = 75 / 1000  # 75 ms in seconds
+INTERPOLATION_THRESHOLD = 300 / 1000
 
 
 def load_colet_data(dataset_dir: str, subject_ids: list[int], task_ids: list[int]):
@@ -85,24 +93,15 @@ def load_colet_data(dataset_dir: str, subject_ids: list[int], task_ids: list[int
             # Append the merged DataFrame to the overall DataFrame
             all_eye_df = pd.concat([all_eye_df, merged_df], ignore_index=True)
 
-            # Drop some unnecessary columns from the dataframes
-            all_eye_df.drop(
-                columns=["confidence", "eye_id"]
-                + [c for c in all_eye_df.columns if c.startswith("ellipse_")],
-                inplace=True,
-                errors="ignore",
-            )
-
     return all_eye_df
 
 
 def preprocess_colet_data(
     eye_df: pd.DataFrame,
-    inter_window_N: int = 100,
     min_num_samples: int = 5,
-    margins: int = 5,
+    margins: int = 50 / 1000,
     verbose: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Preprocess the Colet dataset by interpolating blinks and low condifence zones.
 
@@ -114,15 +113,15 @@ def preprocess_colet_data(
     :param min_num_samples: The minimum number of samples required on either side of a blink for interpolation.
     :param margins: The number of original samples to also inteprolate around the gaps / blinks (avoid edge effects).
     :param verbose: Whether to print progress information during preprocessing.
-    :return inter_eye_df, custom_blinks_df: The preprocessed DataFrame with interpolated values and the custom blinks DataFrame.
+    :return inter_eye_df, custom_gaze_df, custom_pupil_df, gaps_to_fill_df: The preprocessed DataFrame with interpolated values and the custom blinks DataFrame.
     """
     eye_df = eye_df.copy()
     # Identify blinks and low confidence gaps
-    gaps_to_fill_df, custom_blinks_df = detect_gaps_and_blinks(eye_df)
+    gaps_to_fill_df = detect_gaps_and_blinks(eye_df)
 
     if verbose:
         print(
-            f"Identified {len(custom_blinks_df)} blinks and {len(gaps_to_fill_df)} low confidence gaps to fill."
+            f"Identified {len(gaps_to_fill_df[gaps_to_fill_df['is_blink']])} blinks and {len(gaps_to_fill_df)} low confidence gaps to fill."
         )
 
     # Add percentage of low confidence samples w.r.t total samples
@@ -131,44 +130,62 @@ def preprocess_colet_data(
         gaps_to_fill_df["stop_id"] - gaps_to_fill_df["start_id"] + 1
     ).sum()
     blink_samples = (
-        custom_blinks_df["stop_id"] - custom_blinks_df["start_id"] + 1
+        gaps_to_fill_df[gaps_to_fill_df["is_blink"]]["stop_id"]
+        - gaps_to_fill_df[gaps_to_fill_df["is_blink"]]["start_id"]
+        + 1
     ).sum()
     eye_df["low_confidence_percentage"] = (
         low_confidence_samples / (total_samples - blink_samples) * 100
     )
+
+    # Remove low confidence samples
+    n_to_remove = eye_df[eye_df["confidence"] < CONFIDENCE_THRESHOLD].shape[0]
+    eye_df = eye_df[eye_df["confidence"] >= CONFIDENCE_THRESHOLD]
+    if verbose:
+        print(f"Removed {n_to_remove} low confidence samples from the window.")
+
+    # Remove outliers
+    outliers_df = detect_outliers(eye_df, column="pupil_diameter_px", n_multiplier=10)
+    eye_df = eye_df[~eye_df["timestamp_sec"].isin(outliers_df["timestamp_sec"])]
+    if verbose:
+        print(
+            f"Removed {outliers_df.shape[0]} pupil diameter outliers from the window."
+        )
+
+    # Remove samples that are within the margins of detected blinks and gaps
+    size_before = eye_df.shape[0]
+    for _, row in gaps_to_fill_df[
+        gaps_to_fill_df["duration_ms"] >= DURATION_THRESHOLD
+    ].iterrows():
+        idx_to_drop = eye_df[
+            (eye_df["timestamp_sec"] >= row["start_timestamp"] - margins)
+            & (eye_df["timestamp_sec"] <= row["stop_timestamp"] + margins)
+        ].index
+        eye_df.drop(idx_to_drop, inplace=True)
+    size_after = eye_df.shape[0]
+    if verbose:
+        print(
+            f"Removed {size_before - size_after} samples due to low confidence and proximity to detected blinks/gaps."
+        )
+
     # Calculate gaze angles
     eye_df["gaze_angle_delta_deg"] = calculate_gaze_angular_delta(eye_df)
 
-    # Interpolate blinks
-    eye_df, blink_interpolation_info = interpolate_blinks(
-        eye_df,
-        custom_blinks_df,
-        inter_window_N,
-        min_num_samples,
-        margins,
-        verbose=verbose,
-    )
-    if verbose:
-        print(
-            f"Succesfully interpolated {len(blink_interpolation_info)} pupil samples within blinks."
-        )
-
-    # Interpolate missing gaze data
-    eye_df, missing_gaze_interpolation_info = interpolate_missing_gaze(
+    # Interpolate data
+    pupil_df_inter = interpolate_pupil_data(
         eye_df,
         gaps_to_fill_df,
-        inter_window_N,
-        min_num_samples,
-        margins,
-        verbose=verbose,
+        column="pupil_diameter_px",
+        max_gap=INTERPOLATION_THRESHOLD,
     )
-    if verbose:
-        print(
-            f"Successfully interpolated {len(missing_gaze_interpolation_info)} "
-            "low confidence samples during gaps."
-        )
+    gaze_df_inter = interpolate_gaze_angle(
+        eye_df,
+        gaps_to_fill_df,
+        columns=["gaze_angle_delta_deg", "norm_pos_x", "norm_pos_y"],
+        max_gap=INTERPOLATION_THRESHOLD,
+    )
 
     # Finally, calculate gaze angular velocity
-    eye_df["gaze_angular_velocity"] = calculate_angular_velocity(eye_df)
+    gaze_df_inter["gaze_angular_velocity"] = calculate_angular_velocity(gaze_df_inter)
 
-    return eye_df, custom_blinks_df
+    return eye_df, gaze_df_inter, pupil_df_inter, gaps_to_fill_df

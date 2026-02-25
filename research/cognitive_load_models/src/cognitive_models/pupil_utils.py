@@ -9,15 +9,50 @@ LF_COEFFS = None
 VLF_COEFFS = None
 
 
+def detect_outliers(
+    eye_df: pd.DataFrame, column: str, n_multiplier: float = 3.0
+) -> pd.DataFrame:
+    """
+    Detect outliers in a given column of a DataFrame the MAD method
+
+    :param eye_df: The DataFrame to analyze.
+    :param column: The name of the column to analyze for outliers.
+    :param n_multiplier: The multiplier used for the MAD threshold.
+    :return outliers_df: A DataFrame containing the detected outliers.
+    """
+
+    def dilation_speed(
+        data, time_col="timestamp_sec", diameter_col="pupil_diameter_px"
+    ):
+        speed_before = data[diameter_col].diff(1) / data[time_col].diff(1)
+        speed_after = data[diameter_col].diff(-1) / data[time_col].diff(-1)
+        return pd.concat([speed_before.abs(), speed_after.abs()], axis=1).max(axis=1)
+
+    pupil_df = eye_df[[column, "timestamp_sec"]].copy()
+    pupil_df["dilation_speed"] = dilation_speed(pupil_df)
+    # Find the threshold
+    MAD = (
+        (pupil_df["dilation_speed"] - pupil_df["dilation_speed"].median())
+        .abs()
+        .median()
+    )
+    threshold = pupil_df["dilation_speed"].median() + n_multiplier * MAD
+
+    # Marked as outliers the points where dilation speed is above the threshold
+    pupil_df["is_outlier"] = pupil_df["dilation_speed"] > threshold
+
+    return pupil_df[pupil_df["is_outlier"]]
+
+
 def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
     """
     Computes the LHIPA (Low-High Index of Pupillary Activity) for a given eye-tracking DataFrame.
 
-    :param eye_df: Should have a 'pupil_diameter_mm' column with the pupil diameter measurements.
+    :param eye_df: Should have a 'pupil_diameter_px' column with the pupil diameter measurements.
     :param wavelet_type: The type of wavelet to use for decomposition.
     :return lhipa_value: The computed LHIPA value.
     """
-    data = eye_df["pupil_diameter_mm"].to_numpy().copy()
+    data = eye_df["pupil_diameter_px"].to_numpy().copy()
     w = pywt.Wavelet(wavelet_type)
     max_level = pywt.dwt_max_level(len(data), w.dec_len)
 
@@ -73,7 +108,7 @@ def ripa2(
 
     Refer to this paper for explainations: https://doi.org/10.3390/jemr18060070
 
-    :param window_df: Must contain a 'pupil_diameter_mm' column
+    :param window_df: Must contain a 'pupil_diameter_px' column
     :param (M_VLF,N_VLF): The filter length (M) and polynomial order (N) for the VLF filter.
     :param (M_LF,N_LF): The filter length (M) and polynomial order (N) for the LF filter.
     :param D: The order of the derivative to compute (default is 1 for first derivative).
@@ -92,7 +127,7 @@ def ripa2(
         )
 
     # 2- Get the filtered samples that fit the window length (centered)
-    pupil_data = window_df["pupil_diameter_mm"].to_numpy()
+    pupil_data = window_df["pupil_diameter_px"].to_numpy()
     VLF_filtered = np.convolve(pupil_data, VLF_COEFFS, mode="valid")
     LF_filtered = np.convolve(pupil_data, LF_COEFFS, mode="valid")
 

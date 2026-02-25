@@ -9,7 +9,9 @@ from .pupil_utils import lhipa, ripa2
 
 def extract_window_features(
     window_df: pd.DataFrame,
-    blink_df: pd.DataFrame,
+    window_gaze_df: pd.DataFrame,
+    window_pupil_df: pd.DataFrame,
+    gaps_df: pd.DataFrame,
     ivt_threshold: int,
     min_fixation_duration: int,
     verbose: bool = True,
@@ -18,14 +20,16 @@ def extract_window_features(
     Extracts features from the eye-tracking window data, including fixations, saccades, and blinks.
 
     :param window_df:With columns 'timestamp_sec', 'confidence', 'blink', 'gaze_angle_delta_deg', and 'gaze_angular_velocity'.
-    :param blink_df: DataFrame containing blink information with columns 'start_timestamp', 'stop_timestamp'.
+    :param window_gaze_df: DataFrame containing gaze data for the window.
+    :param window_pupil_df: DataFrame containing pupil data for the window.
+    :param gaps_df: DataFrame containing gap information with columns 'start_timestamp', 'stop_timestamp', and 'is_blink'.
     :param ivt_threshold: The velocity threshold (in deg/s) for identifying saccades.
     :param min_fixation_duration: The minimum duration (in milliseconds) for a fixation to be considered valid.
     :return features: A dictionary containing extracted features.
     """
     # 1- Extract fixations and saccades
     _, fixations, saccades = calculate_fixations_saccades(
-        window_df, ivt_threshold, min_fixation_duration, verbose=verbose
+        window_gaze_df, gaps_df, ivt_threshold, min_fixation_duration, verbose=verbose
     )
 
     features = defaultdict(lambda: 0)
@@ -57,7 +61,8 @@ def extract_window_features(
         )
 
     # 4- Blinks: count, duration mean
-    if blink_df is None:
+    blink_df = gaps_df[gaps_df["is_blink"]]
+    if blink_df.empty:
         features["blinks_count"] = 0
         features["blinks_duration_mean"] = 0
     else:
@@ -69,7 +74,7 @@ def extract_window_features(
             ).mean()
 
     # 5- Pupil related features
-    features["pupil_lhipa"] = lhipa(window_df, wavelet_type="sym8")
-    features["pupil_ripa2"] = ripa2(window_df, VLF=(98, 2), LF=(13, 4), D=1)
+    features["pupil_lhipa"] = lhipa(window_pupil_df, wavelet_type="sym8")
+    features["pupil_ripa2"] = ripa2(window_pupil_df, VLF=(98, 2), LF=(13, 4), D=1)
 
     return features
