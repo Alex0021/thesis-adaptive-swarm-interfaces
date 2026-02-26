@@ -62,6 +62,7 @@ def lhipa(eye_df: pd.DataFrame, wavelet_type: str = "sym16") -> float:
         print(
             "Warning: hif and lof are equal, which may lead to issues in LHIPA computation"
         )
+        return np.nan
 
     cD_H = pywt.downcoef("d", data, w, level=hif, mode="per")
     cD_L = pywt.downcoef("d", data, w, level=lof, mode="per")
@@ -136,6 +137,11 @@ def ripa2(
     LF_filtered = LF_filtered[delta : len(LF_filtered) - delta]
 
     # 3- Compute the RIPA2 value
+    if LF_filtered.shape[0] != VLF_filtered.shape[0]:
+        print(
+            "Warning: Shape mismatch between LF and VLF signals. Returning NaN for RIPA2."
+        )
+        return np.nan
     ripa2 = np.clip(LF_filtered**2 - VLF_filtered**2, 0, 1.5)
 
     # 4- For now, return the mean value of the RIPA2

@@ -315,24 +315,24 @@ def calculate_fixations_saccades(
     saccades_df = pd.DataFrame(rows_saccades)
     fixations_df = pd.DataFrame(rows_fixations)
 
-    for _, row in gaps_df[gaps_df["is_blink"]].iterrows():
-        condition = (saccades_df["start_timestamp"] >= row["start_timestamp"]) & (
-            saccades_df["stop_timestamp"] <= row["start_timestamp"]
-        )
-        if condition.any():
-            saccades_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
-            saccades_df.loc[condition, "duration_ms"] = (
-                saccades_df.loc[condition, "stop_timestamp"]
-                - saccades_df.loc[condition, "start_timestamp"]
-            ) * 1000
-        condition = (fixations_df["start_timestamp"] >= row["start_timestamp"]) & (
-            fixations_df["stop_timestamp"] <= row["start_timestamp"]
-        )
-        if condition.any():
-            fixations_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
-            fixations_df.loc[condition, "duration_ms"] = (
-                fixations_df.loc[condition, "stop_timestamp"]
-                - fixations_df.loc[condition, "start_timestamp"]
-            ) * 1000
+    # for _, row in gaps_df[gaps_df["is_blink"]].iterrows():
+    #     condition = (saccades_df["start_timestamp"] >= row["start_timestamp"]) & (
+    #         saccades_df["stop_timestamp"] <= row["start_timestamp"]
+    #     )
+    #     if condition.any():
+    #         saccades_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
+    #         saccades_df.loc[condition, "duration_ms"] = (
+    #             saccades_df.loc[condition, "stop_timestamp"]
+    #             - saccades_df.loc[condition, "start_timestamp"]
+    #         ) * 1000
+    #     condition = (fixations_df["start_timestamp"] >= row["start_timestamp"]) & (
+    #         fixations_df["stop_timestamp"] <= row["start_timestamp"]
+    #     )
+    #     if condition.any():
+    #         fixations_df.loc[condition, "stop_timestamp"] = row["start_timestamp"]
+    #         fixations_df.loc[condition, "duration_ms"] = (
+    #             fixations_df.loc[condition, "stop_timestamp"]
+    #             - fixations_df.loc[condition, "start_timestamp"]
+    #         ) * 1000
 
     return eye_df, fixations_df, saccades_df

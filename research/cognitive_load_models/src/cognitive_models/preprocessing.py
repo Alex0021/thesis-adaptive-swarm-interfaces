@@ -98,7 +98,7 @@ def load_colet_data(dataset_dir: str, subject_ids: list[int], task_ids: list[int
 
 def preprocess_colet_data(
     eye_df: pd.DataFrame,
-    min_num_samples: int = 5,
+    max_confidence_percentage: int = 30,
     margins: int = 50 / 1000,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -127,16 +127,14 @@ def preprocess_colet_data(
     # Add percentage of low confidence samples w.r.t total samples
     total_samples = len(eye_df)
     low_confidence_samples = (
-        gaps_to_fill_df["stop_id"] - gaps_to_fill_df["start_id"] + 1
-    ).sum()
-    blink_samples = (
-        gaps_to_fill_df[gaps_to_fill_df["is_blink"]]["stop_id"]
-        - gaps_to_fill_df[gaps_to_fill_df["is_blink"]]["start_id"]
+        gaps_to_fill_df.loc[~gaps_to_fill_df["is_blink"], "stop_id"]
+        - gaps_to_fill_df.loc[~gaps_to_fill_df["is_blink"], "start_id"]
         + 1
     ).sum()
-    eye_df["low_confidence_percentage"] = (
-        low_confidence_samples / (total_samples - blink_samples) * 100
-    )
+    low_confidence_percent = low_confidence_samples / (total_samples) * 100
+    eye_df["low_confidence_percentage"] = low_confidence_percent
+    if low_confidence_percent > max_confidence_percentage:
+        return eye_df, pd.DataFrame(), pd.DataFrame(), gaps_to_fill_df
 
     # Remove low confidence samples
     n_to_remove = eye_df[eye_df["confidence"] < CONFIDENCE_THRESHOLD].shape[0]
