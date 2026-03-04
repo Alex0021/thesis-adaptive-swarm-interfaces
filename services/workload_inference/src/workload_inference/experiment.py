@@ -2,7 +2,7 @@ import glob
 import logging
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -80,12 +80,17 @@ class ExperimentManager:
         self._request_nback_dump = False
         self._start_time: float | None = None
         self._duration: float | None = None
+        self._already_initialized = False
 
         # Threads
         self._api_thread: threading.Thread | None = None
         self._api_thread_running = False
         self._lock = threading.Lock()
-        self._api_on_error: bool = False
+        self._api_on_error: bool = True
+        self._previous_api_on_error: bool = False
+
+        # Listeners / Callbacks
+        self._api_ready_listeners: list[Callable] = [self.initialize_all]
 
         # Try to read experiment data from yaml file
         if not (self.base_folder / CONFIG_FILE_NAME).exists():
@@ -136,6 +141,28 @@ class ExperimentManager:
             self._drone_receiver.stop()
         if self._nback_receiver is not None and self._nback_receiver.is_alive():
             self._nback_receiver.stop()
+
+    def register_api_ready_listener(self, listener: Callable) -> None:
+        """
+        Register a listener to be called when the API shifts from error to ready.
+
+        Args:
+            listener (Callable): A callable to be called when the API is ready.
+        """
+        with self._lock:
+            if listener not in self._api_ready_listeners:
+                self._api_ready_listeners.append(listener)
+
+    def initialize_all(self) -> None:
+        """
+        Initialize all components: receivers, data writers and listeners.
+        """
+        if self._already_initialized:
+            return
+        self._already_initialized = True
+        self.initialize_receivers()
+        self.initialize_data_writers()
+        self.initialize_listeners()
 
     def initialize_receivers(self) -> None:
         if self._gaze_receiver is None:
@@ -381,9 +408,14 @@ class ExperimentManager:
                 self._current_status = self._api.get_experiment_state()
                 self.update_internal_state(self._current_status)
                 self._api_on_error = False
+                if self._previous_api_on_error:
+                    # Got response and was in error state: notify listeners
+                    for listener in self._api_ready_listeners:
+                        listener()
             except ExperimentAPIError as e:
                 logger.warning("Failed to fetch experiment status: %s", e)
                 self._api_on_error = True
+            self._previous_api_on_error = self._api_on_error
             time.sleep(EXPERIMENT_STATUS_UPDATE_RATE_MS / 1000)
 
     def _write_extra_experiment_info(self) -> None:
@@ -456,6 +488,8 @@ class ExperimentManagerWindow(QMainWindow):
 
         self._initialize_core_compoonents()
         self._initialize_widgets()
+
+        self.experiment_manager.register_api_ready_listener(self.attach_listeners)
 
     def _initialize_core_compoonents(self):
         self.setWindowTitle("Experiment Manager")

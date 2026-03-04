@@ -34,9 +34,6 @@ def main():
 
     try:
         experiment_manager = ExperimentManager()
-        experiment_manager.initialize_receivers()
-        experiment_manager.initialize_data_writers()
-        experiment_manager.initialize_listeners()
         experiment_window = ExperimentManagerWindow(experiment_manager)
         experiment_window.show()
         # fake_data_generator = FakeGazeGenerator(
@@ -47,9 +44,7 @@ def main():
         #     pupil_mean=3.5,
         # )
         # fake_data_generator.start()
-        experiment_window.attach_listeners()
-        experiment_manager.gaze_receiver.start()
-        experiment_manager._nback_receiver.start()
+        # experiment_window.attach_listeners()
         experiment_window.start()
 
         # receiver = ZMQReceiver()
