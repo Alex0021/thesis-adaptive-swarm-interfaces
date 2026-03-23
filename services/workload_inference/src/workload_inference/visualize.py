@@ -19,10 +19,282 @@ from matplotlib.lines import Line2D
 from matplotlib.widgets import Button, Slider
 from numpy.typing import NDArray
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from workload_inference.constants import DATA_DIR
 from workload_inference.data_structures import DroneData, GazeData, Listener
+
+SPLINE_TRAJECTORY_FILE = DATA_DIR / "spline_trajectory.csv"
+DRONE_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+]
+
+
+class DroneDataCanvas(FigureCanvas):
+    """Matplotlib canvas for top-down drone position visualization"""
+
+    def __init__(
+        self,
+        parent: QMainWindow | None = None,
+        num_drones: int = 9,
+        max_history: int = 1000,
+        plotting_window: int = 200,
+        update_freq: int = 30,
+    ):
+        """
+        Initialize the canvas for drone position visualization.
+
+        Args:
+            parent (QMainWindow | None): Parent window for the canvas.
+            num_drones (int): Number of drones to track.
+            max_history (int): Maximum number of data points to keep in history.
+            plotting_window (int): Number of data points to display per drone trail.
+            update_freq (int): Frequency of plot updates in Hz.
+        """
+        self.fig = Figure(figsize=(6, 6), dpi=100)
+        super().__init__(self.fig)
+        self.parent = parent
+        self.num_drones = num_drones
+        self.window_size = plotting_window
+        self.update_freq = update_freq
+        self.data_cb_cnt = 0
+        self._timer = QTimer(parent)
+        self._timer.timeout.connect(self._update_all)
+
+        # Initialize plot
+        self.ax = self.fig.add_subplot(1, 1, 1, aspect="equal")
+
+        # Load spline trajectory for background track
+        self._spline_x: NDArray[np.float64] | None = None
+        self._spline_z: NDArray[np.float64] | None = None
+        self._load_spline_trajectory()
+
+        # Pre-allocated ring buffers per drone (num_drones x window x 2)
+        self._buffers = np.full((num_drones, plotting_window, 2), np.nan)
+        self._buf_lens = np.zeros(num_drones, dtype=int)  # valid sample count
+        self._buf_idx = np.zeros(num_drones, dtype=int)  # write cursor
+
+        # Blit objects: single scatter for all trails, single scatter for positions
+        self.trail_scatter: PathCollection | None = None
+        self.position_scatter: PathCollection | None = None
+        self._sizes_template = np.linspace(2, 20, plotting_window)
+
+        # Pre-compute RGBA color arrays (trail + position) once
+        import matplotlib.colors as mcolors
+
+        trail_rgba = np.empty((num_drones, plotting_window, 4))
+        pos_rgba = np.empty((num_drones, 4))
+        for i in range(num_drones):
+            r, g, b = mcolors.to_rgb(DRONE_COLORS[i % len(DRONE_COLORS)])
+            trail_rgba[i, :] = (r, g, b, 0.4)
+            pos_rgba[i] = (r, g, b, 1.0)
+        self._trail_rgba_full = trail_rgba  # (num_drones, window, 4)
+        self._pos_rgba = pos_rgba  # (num_drones, 4)
+
+        # Cached concatenated arrays (rebuilt only when total point count changes)
+        self._cached_trail_colors: NDArray | None = None
+        self._cached_trail_sizes: NDArray | None = None
+        self._cached_point_count = -1
+
+        # Blitting state
+        self._background = None
+        self._blit_ready = False
+
+        self._init_plots()
+        self.fig.tight_layout()
+
+        # Blitting hooks
+        self.mpl_connect("draw_event", self._on_draw)
+        self.mpl_connect("resize_event", self._on_resize)
+        self._init_blit()
+
+        self._timer.start(1000 // self.update_freq)
+
+    def _load_spline_trajectory(self):
+        """Load the spline trajectory CSV for the background track."""
+        try:
+            spline_df = pd.read_csv(SPLINE_TRAJECTORY_FILE)
+            self._spline_x = spline_df["x"].values
+            self._spline_z = spline_df["z"].values
+        except FileNotFoundError:
+            logging.getLogger("DroneDataCanvas").warning(
+                "Spline trajectory file not found at '%s'.", SPLINE_TRAJECTORY_FILE
+            )
+
+    def _init_plots(self):
+        """Initialize plot styling and labels"""
+        self.ax.set_title("Drone Positions (Top-Down)")
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Z")
+
+        # Draw spline trajectory as background
+        if self._spline_x is not None and self._spline_z is not None:
+            self.ax.plot(
+                self._spline_x,
+                self._spline_z,
+                color="lightgray",
+                linewidth=2,
+                linestyle="--",
+                label="Track",
+                zorder=0,
+            )
+            # Auto-fit axis limits from trajectory with padding
+            pad_x = (self._spline_x.max() - self._spline_x.min()) * 0.1
+            pad_z = (self._spline_z.max() - self._spline_z.min()) * 0.1
+            self.ax.set_xlim(self._spline_x.min() - pad_x, self._spline_x.max() + pad_x)
+            self.ax.set_ylim(self._spline_z.min() - pad_z, self._spline_z.max() + pad_z)
+
+    def _init_blit(self):
+        """Initialize blitting by caching the background"""
+        if self.trail_scatter is not None:
+            self.trail_scatter.set_animated(True)
+        if self.position_scatter is not None:
+            self.position_scatter.set_animated(True)
+
+        self.draw()
+        self._background = self.copy_from_bbox(self.fig.bbox)
+        self._blit_ready = True
+
+    def _on_draw(self, _event):
+        """Cache background on draw events"""
+        self._background = self.copy_from_bbox(self.fig.bbox)
+        self._blit_ready = True
+
+    def _on_resize(self, _event):
+        """Reinitialize blitting on resize"""
+        self._blit_ready = False
+        self.draw()
+
+    def _blit_update(self):
+        """Fast redraw using blitting"""
+        if not self._blit_ready or self._background is None:
+            self.draw_idle()
+            return
+
+        self.restore_region(self._background)
+
+        if self.trail_scatter is not None:
+            self.ax.draw_artist(self.trail_scatter)
+        if self.position_scatter is not None:
+            self.ax.draw_artist(self.position_scatter)
+
+        self.blit(self.fig.bbox)
+
+    def _update_all(self):
+        """Update all drone plots"""
+        self.update_drone_positions()
+        self._blit_update()
+
+    def update_drone_positions(self):
+        """Update scatter plots for all drone trails and current positions"""
+        total_points = int(self._buf_lens.sum())
+        if total_points == 0:
+            return
+
+        # Build trail offsets from ring buffers (only position data changes each frame)
+        trail_offsets = np.empty((total_points, 2))
+        current_offsets = np.empty((int((self._buf_lens > 0).sum()), 2))
+        offset = 0
+        cur_idx = 0
+        for drone_id in range(self.num_drones):
+            n = self._buf_lens[drone_id]
+            if n == 0:
+                continue
+            buf = self._buffers[drone_id]
+            wi = self._buf_idx[drone_id]
+            if n < self.window_size:
+                # Buffer not yet full: data is [0..n)
+                trail_offsets[offset : offset + n] = buf[:n]
+            else:
+                # Buffer full: read in ring order starting from write cursor
+                trail_offsets[offset : offset + self.window_size - wi] = buf[wi:]
+                trail_offsets[
+                    offset + self.window_size - wi : offset + n
+                ] = buf[:wi]
+            current_offsets[cur_idx] = trail_offsets[offset + n - 1]
+            offset += n
+            cur_idx += 1
+
+        # Rebuild cached colors/sizes only when total point count changes
+        count_changed = total_points != self._cached_point_count
+        if count_changed:
+            self._cached_point_count = total_points
+            sizes_parts = []
+            colors_parts = []
+            for drone_id in range(self.num_drones):
+                n = self._buf_lens[drone_id]
+                if n == 0:
+                    continue
+                sizes_parts.append(self._sizes_template[-n:])
+                colors_parts.append(self._trail_rgba_full[drone_id, -n:])
+            self._cached_trail_sizes = np.concatenate(sizes_parts)
+            self._cached_trail_colors = np.concatenate(colors_parts)
+
+        # Trail scatter (single artist for all drones)
+        if self.trail_scatter is None:
+            self.trail_scatter = self.ax.scatter(
+                trail_offsets[:, 0],
+                trail_offsets[:, 1],
+                s=self._cached_trail_sizes,
+                c=self._cached_trail_colors,
+                zorder=1,
+            )
+            self.trail_scatter.set_animated(True)
+        else:
+            self.trail_scatter.set_offsets(trail_offsets)
+            if count_changed:
+                self.trail_scatter.set_sizes(self._cached_trail_sizes)
+                self.trail_scatter.set_facecolors(self._cached_trail_colors)
+
+        # Current position markers (single artist for all drones)
+        active_mask = self._buf_lens > 0
+        current_colors = self._pos_rgba[active_mask]
+        if self.position_scatter is None:
+            self.position_scatter = self.ax.scatter(
+                current_offsets[:, 0],
+                current_offsets[:, 1],
+                s=80,
+                c=current_colors,
+                edgecolors="black",
+                linewidths=1,
+                marker="o",
+                zorder=2,
+            )
+            self.position_scatter.set_animated(True)
+        else:
+            self.position_scatter.set_offsets(current_offsets)
+
+    def datas_callback(
+        self, datas: Sequence[DroneData], batch_update: bool = False
+    ) -> None:
+        """Callback to store drone position data (minimal processing)
+
+        Args:
+            datas: List of new drone data points to add to the history
+            batch_update: Whether to flush the history and only use the given datas
+        """
+        if batch_update:
+            self._buffers[:] = np.nan
+            self._buf_lens[:] = 0
+            self._buf_idx[:] = 0
+        for drone_data in datas:
+            self.data_cb_cnt += 1
+            drone_id = int(drone_data.id)
+            if 0 <= drone_id < self.num_drones:
+                wi = self._buf_idx[drone_id]
+                self._buffers[drone_id, wi, 0] = float(drone_data.position_x)
+                self._buffers[drone_id, wi, 1] = float(drone_data.position_z)
+                self._buf_idx[drone_id] = (wi + 1) % self.window_size
+                if self._buf_lens[drone_id] < self.window_size:
+                    self._buf_lens[drone_id] += 1
 
 
 class GazeDataCanvas(FigureCanvas):
@@ -557,22 +829,29 @@ class ExperimentDataReplayWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle("Experiment Data Replay")
-        self.setGeometry(150, 150, 1000, 800)
+        self.setGeometry(150, 150, 1400, 800)
 
         central_widget = QWidget()
         layout = QVBoxLayout(central_widget)
 
-        self.visualizer = GazeDataCanvas(parent=self)
+        self.gaze_visualizer = GazeDataCanvas(parent=self)
+        self.drone_visualizer = DroneDataCanvas(parent=self)
         if trial_folder:
             self.replay_data = ReplayData(
-                trial_folder=trial_folder, gaze_callback=self.visualizer.datas_callback
+                trial_folder=trial_folder,
+                gaze_callback=self.gaze_visualizer.datas_callback,
+                drone_callback=self.drone_visualizer.datas_callback,
             )
             self.replay_slider = self.replay_data.slider
         else:
             self.replay_slider = ReplaySlider(parent=self)
 
+        canvas_layout = QHBoxLayout()
+        canvas_layout.addWidget(self.gaze_visualizer, 1)
+        canvas_layout.addWidget(self.drone_visualizer, 1)
+
         layout.addWidget(self.replay_slider.canvas)
-        layout.addWidget(self.visualizer, 1)
+        layout.addLayout(canvas_layout, 1)
 
         self.replay_slider.play_btn.on_clicked(self.play)
         self.replay_slider.pause_btn.on_clicked(self.pause)
@@ -627,7 +906,9 @@ def main():
 
     app = QApplication(sys.argv)
 
-    replay_folder = DATA_DIR / "experiments/experiment_1/P001/task_1/trial_1"
+    replay_folder = (
+        DATA_DIR / "experiments" / "experiment_nback" / "ALH0" / "FlyingPractice"
+    )
     window = ExperimentDataReplayWindow(trial_folder=replay_folder)
     window.show()
 

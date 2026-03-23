@@ -29,7 +29,7 @@ from workload_inference.data_structures import (
 )
 from workload_inference.py_receiver import SMReceiver, SMReceiverCircularBuffer
 from workload_inference.utilities import ExperimentDataWriter
-from workload_inference.visualize import GazeDataCanvas
+from workload_inference.visualize import DroneDataCanvas, GazeDataCanvas
 
 # Experiment specific constants
 CONFIG_FILE_NAME = "experiment.yaml"
@@ -463,6 +463,10 @@ class ExperimentManager:
         return self._gaze_receiver
 
     @property
+    def drone_receiver(self) -> SMReceiver | None:
+        return self._drone_receiver
+
+    @property
     def api_on_error(self) -> bool:
         return self._api_on_error
 
@@ -506,12 +510,23 @@ class ExperimentManagerWindow(QMainWindow):
             screen_height=1200,
             plotting_window=200,
         )
+        self._drone_visualizer = DroneDataCanvas(
+            parent=self,
+            num_drones=DRONE_COUNT,
+            plotting_window=200,
+        )
         # Experiment control and status widgets
         self._experiment_management_widget = QWidget()
         self._experiment_management_layout = QGridLayout()
         self._experiment_management_widget.setLayout(self._experiment_management_layout)
         self._layout.addWidget(self._experiment_management_widget, 0)
-        self._layout.addWidget(self._gaze_visualizer, 1)
+        # Canvas layout for gaze and drone visualizers side by side
+        self._canvas_widget = QWidget()
+        self._canvas_layout = QHBoxLayout()
+        self._canvas_widget.setLayout(self._canvas_layout)
+        self._canvas_layout.addWidget(self._gaze_visualizer, 1)
+        self._canvas_layout.addWidget(self._drone_visualizer, 1)
+        self._layout.addWidget(self._canvas_widget, 1)
 
         # Title
         self._title_label = QLabel("Experiment Management")
@@ -793,6 +808,15 @@ class ExperimentManagerWindow(QMainWindow):
             logger.warning(
                 "Gaze receiver is not initialized. "
                 "Cannot attach gaze visualizer listener."
+            )
+        if self.experiment_manager.drone_receiver is not None:
+            self.experiment_manager.drone_receiver.register_listener(
+                self._drone_visualizer.datas_callback
+            )
+        else:
+            logger.warning(
+                "Drone receiver is not initialized. "
+                "Cannot attach drone visualizer listener."
             )
 
     def closeEvent(self, event: Any) -> None:
