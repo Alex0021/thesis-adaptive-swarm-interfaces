@@ -4,7 +4,6 @@ import os
 os.environ["QT_API"] = "PyQt6"  # Ensure PyQt6 is used for matplotlib backend
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -216,9 +215,7 @@ class DroneDataCanvas(FigureCanvas):
             else:
                 # Buffer full: read in ring order starting from write cursor
                 trail_offsets[offset : offset + self.window_size - wi] = buf[wi:]
-                trail_offsets[
-                    offset + self.window_size - wi : offset + n
-                ] = buf[:wi]
+                trail_offsets[offset + self.window_size - wi : offset + n] = buf[:wi]
             current_offsets[cur_idx] = trail_offsets[offset + n - 1]
             offset += n
             cur_idx += 1
@@ -321,7 +318,7 @@ class GazeDataCanvas(FigureCanvas):
             plotting_window (int): Number of data points to display in the plots.
             update_freq (int): Frequency of plot updates in Hz.
         """
-        self.fig = Figure(figsize=(8, 6), dpi=100, tight_layout=True)
+        self.fig = Figure(figsize=(8, 6), dpi=100)
         super().__init__(self.fig)
         self.parent = parent
         self.screen_width = screen_width
@@ -338,30 +335,32 @@ class GazeDataCanvas(FigureCanvas):
         self.ax_validity = self.fig.add_subplot(3, 2, 5)
         self.ax_pupil = self.fig.add_subplot(3, 2, 6)
 
-        # Data buffers
-        self.gaze_hist: deque[tuple[float, float]] = deque(
-            maxlen=plotting_window
-        )  # (x, y) positions
-        self.validity_hist: deque[tuple[int, int]] = deque(
-            maxlen=plotting_window
-        )  # (left_validity, right_validity)
-        self.pupil_hist: deque[tuple[float, float]] = deque(
-            maxlen=plotting_window
-        )  # (left_diameter, right_diameter)
+        # Pre-allocated ring buffers (avoids deque -> np.array conversion each frame)
+        self._gaze_buf = np.full((plotting_window, 2), np.nan)
+        self._validity_buf = np.full((plotting_window, 2), -1, dtype=int)
+        self._pupil_buf = np.full((plotting_window, 2), np.nan)
+        self._buf_len = 0
+        self._buf_idx = 0  # write cursor
+
+        # Pre-allocated padded validity array for imshow (avoids alloc each frame)
+        self._validity_padded = np.full((2, plotting_window), -1, dtype=int)
 
         # TEST data
         d = np.linspace(3.0, 4.0, plotting_window)
         for i in range(plotting_window):
-            self.validity_hist.append(
-                (i > plotting_window // 2, i < plotting_window // 2)
+            self._validity_buf[i] = (
+                int(i > plotting_window // 2),
+                int(i < plotting_window // 2),
             )
-            self.pupil_hist.append((d[i], np.random.rand() + 3.5))
+            self._pupil_buf[i] = (d[i], np.random.rand() + 3.5)
         # Create a circle trace of gaze points counter clockwise starting from top
         for i in range(plotting_window):
             angle = 2 * np.pi * (i / plotting_window)
             x = (self.screen_width / 2) + (self.screen_width / 4) * np.sin(angle)
             y = (self.screen_height / 2) - (self.screen_height / 4) * np.cos(angle)
-            self.gaze_hist.append((x, y))
+            self._gaze_buf[i] = (x, y)
+        self._buf_len = plotting_window
+        self._buf_idx = 0
 
         # Blit objects
         self.pupil_hist_lines: list[Line2D] = []
@@ -369,6 +368,12 @@ class GazeDataCanvas(FigureCanvas):
         self.gaze_scatter: PathCollection | None = None
         self.sizes = np.linspace(5, 50, plotting_window)
         self.colors = np.linspace(0.1, 1.0, plotting_window)
+
+        # Pre-create validity colormap and norm (reused every frame)
+        self._validity_cmap = ListedColormap(["white", "red", "green"])
+        self._validity_norm = BoundaryNorm(
+            [-1.5, -0.5, 0.5, 1.5], self._validity_cmap.N
+        )
 
         # Blitting state
         self._background = None
@@ -383,6 +388,7 @@ class GazeDataCanvas(FigureCanvas):
         self.mpl_connect("draw_event", self._on_draw)
         self.mpl_connect("resize_event", self._on_resize)
         self._init_blit()
+        self.fig.tight_layout()
 
         self._timer.start(1000 // self.update_freq)
 
@@ -462,87 +468,90 @@ class GazeDataCanvas(FigureCanvas):
         self.update_pupil_diameter()
         self._blit_update()
 
+    def _get_ordered_buf(self, buf: NDArray) -> NDArray:
+        """Extract valid data from a ring buffer in chronological order."""
+        n = self._buf_len
+        if n < self.window_size:
+            return buf[:n]
+        wi = self._buf_idx
+        return np.concatenate((buf[wi:], buf[:wi]))
+
     def update_pupil_diameter(self):
         """Update line plot for pupil diameter trends"""
-        pupil_data = np.array(self.pupil_hist)
+        pupil_data = self._get_ordered_buf(self._pupil_buf)
+        n = len(pupil_data)
+        if n == 0:
+            return
         if len(self.pupil_hist_lines) == 0:
-            indices = np.arange(-len(pupil_data), 0)
+            indices = np.arange(-n, 0)
             self.pupil_hist_lines = self.ax_pupil.plot(
                 indices, pupil_data[:, 0], label="Left", color="blue"
             )
             self.pupil_hist_lines += self.ax_pupil.plot(
                 indices, pupil_data[:, 1], label="Right", color="orange"
             )
-            mean_diameter = np.mean(pupil_data, axis=1)
+            mean_diameter = pupil_data.mean(axis=1)
             self.pupil_hist_lines += self.ax_pupil.plot(
                 indices, mean_diameter, label="Mean", linestyle="--", color="black"
             )
             self.ax_pupil.legend()
         else:
-            # Update x data if needed (in case of window size change),
-            # but only update y data for efficiency
             xdata = np.asarray(self.pupil_hist_lines[0].get_xdata())
-            if pupil_data.shape[0] != xdata.shape[0]:
-                indices = np.arange(-pupil_data.shape[0], 0)
+            if n != xdata.shape[0]:
+                indices = np.arange(-n, 0)
                 for line in self.pupil_hist_lines:
                     line.set_xdata(indices)
 
-            for i, line in enumerate(self.pupil_hist_lines):
-                if i < 2:
-                    line.set_ydata([pupil_data[t][i] for t in range(len(pupil_data))])
-                else:
-                    mean_diameter = np.mean(pupil_data, axis=1)
-                    line.set_ydata(mean_diameter)
+            self.pupil_hist_lines[0].set_ydata(pupil_data[:, 0])
+            self.pupil_hist_lines[1].set_ydata(pupil_data[:, 1])
+            self.pupil_hist_lines[2].set_ydata(pupil_data.mean(axis=1))
 
     def update_eye_validity(self):
         """
         Update bar plot for eye validity history
         Using an image mapping to be efficient for plotting
         """
-        validity_data = np.array(self.validity_hist).T  # Shape (2, N)
-        # Pad to full window size with -1 (unknown) on the left if needed
-        cur_len = validity_data.shape[1]
-        if cur_len < self.window_size:
-            pad = np.full((2, self.window_size - cur_len), -1, dtype=int)
-            validity_padded = np.concatenate((pad, validity_data), axis=1)
-        else:
-            validity_padded = validity_data
-
-        cmap = ListedColormap(["white", "red", "green"])
-        norm = BoundaryNorm([-1.5, -0.5, 0.5, 1.5], cmap.N)
+        validity_data = self._get_ordered_buf(self._validity_buf)
+        n = len(validity_data)
+        # Write into pre-allocated padded array (avoids alloc each frame)
+        self._validity_padded[:] = -1
+        if n > 0:
+            self._validity_padded[:, -n:] = validity_data.T
 
         if self.validity_img is None:
             self.validity_img = self.ax_validity.imshow(
-                validity_padded,
+                self._validity_padded,
                 aspect="auto",
-                cmap=cmap,
-                norm=norm,
+                cmap=self._validity_cmap,
+                norm=self._validity_norm,
                 extent=(-self.window_size, 0, -0.5, 1.5),
             )
         else:
-            self.validity_img.set_data(validity_padded)
+            self.validity_img.set_data(self._validity_padded)
 
     def update_gaze_trace(self):
         """
         Update scatter plot for gaze position trace
         Only recalculate sizes/colors for NEW points
         """
-        gaze_data = np.array(self.gaze_hist)
+        gaze_data = self._get_ordered_buf(self._gaze_buf)
+        n = len(gaze_data)
+        if n == 0:
+            return
 
         if self.gaze_scatter is None:
-            # Initial creation only
             self.gaze_scatter = self.ax_gaze.scatter(
                 gaze_data[:, 0],
                 gaze_data[:, 1],
-                s=self.sizes,
-                c=self.colors,
+                s=self.sizes[-n:],
+                c=self.colors[-n:],
                 cmap="Greys",
                 alpha=0.7,
             )
         else:
-            if len(gaze_data) < self.window_size:
-                self.gaze_scatter.set_sizes(self.sizes[-len(gaze_data) :])
-                self.gaze_scatter.set_array(self.colors[-len(gaze_data) :])
+            if n < self.window_size:
+                self.gaze_scatter.set_sizes(self.sizes[-n:])
+                self.gaze_scatter.set_array(self.colors[-n:])
             self.gaze_scatter.set_offsets(gaze_data)
 
     def datas_callback(
@@ -555,22 +564,27 @@ class GazeDataCanvas(FigureCanvas):
             batch_update: Wether to flush the history and only use the given datas
         """
         if batch_update:
-            # empty the history to only use data from the batch
-            self.gaze_hist.clear()
-            self.validity_hist.clear()
-            self.pupil_hist.clear()
+            self._gaze_buf[:] = np.nan
+            self._validity_buf[:] = -1
+            self._pupil_buf[:] = np.nan
+            self._buf_len = 0
+            self._buf_idx = 0
         for gaze_data in datas:
             self.data_cb_cnt += 1
-            x = gaze_data.left_point_screen_x * self.screen_width
-            y = gaze_data.left_point_screen_y * self.screen_height
-            left_validity = int(gaze_data.left_validity)
-            right_validity = int(gaze_data.right_validity)
-            left_diameter = float(gaze_data.left_pupil_diameter)
-            right_diameter = float(gaze_data.right_pupil_diameter)
-
-            self.gaze_hist.append((float(x), float(y)))
-            self.validity_hist.append((left_validity, right_validity))
-            self.pupil_hist.append((left_diameter, right_diameter))
+            wi = self._buf_idx
+            self._gaze_buf[wi, 0] = float(
+                gaze_data.left_point_screen_x * self.screen_width
+            )
+            self._gaze_buf[wi, 1] = float(
+                gaze_data.left_point_screen_y * self.screen_height
+            )
+            self._validity_buf[wi, 0] = int(gaze_data.left_validity)
+            self._validity_buf[wi, 1] = int(gaze_data.right_validity)
+            self._pupil_buf[wi, 0] = float(gaze_data.left_pupil_diameter)
+            self._pupil_buf[wi, 1] = float(gaze_data.right_pupil_diameter)
+            self._buf_idx = (wi + 1) % self.window_size
+            if self._buf_len < self.window_size:
+                self._buf_len += 1
 
 
 class ReplaySlider:
@@ -841,6 +855,7 @@ class ExperimentDataReplayWindow(QMainWindow):
                 trial_folder=trial_folder,
                 gaze_callback=self.gaze_visualizer.datas_callback,
                 drone_callback=self.drone_visualizer.datas_callback,
+                sampling_rate=60.0,
             )
             self.replay_slider = self.replay_data.slider
         else:
