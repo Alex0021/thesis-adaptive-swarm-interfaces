@@ -366,6 +366,7 @@ class GazeDataCanvas(FigureCanvas):
         self.pupil_hist_lines: list[Line2D] = []
         self.validity_img: AxesImage | None = None
         self.gaze_scatter: PathCollection | None = None
+        self.gaze_current: PathCollection | None = None
         self.sizes = np.linspace(5, 50, plotting_window)
         self.colors = np.linspace(0.1, 1.0, plotting_window)
 
@@ -426,6 +427,8 @@ class GazeDataCanvas(FigureCanvas):
             self.validity_img.set_animated(True)
         if self.gaze_scatter is not None:
             self.gaze_scatter.set_animated(True)
+        if self.gaze_current is not None:
+            self.gaze_current.set_animated(True)
 
         self.draw()
         self._background = self.copy_from_bbox(self.fig.bbox)
@@ -458,6 +461,8 @@ class GazeDataCanvas(FigureCanvas):
 
         if self.gaze_scatter is not None:
             self.ax_gaze.draw_artist(self.gaze_scatter)
+        if self.gaze_current is not None:
+            self.ax_gaze.draw_artist(self.gaze_current)
 
         self.blit(self.fig.bbox)
 
@@ -539,6 +544,7 @@ class GazeDataCanvas(FigureCanvas):
         if n == 0:
             return
 
+        # Trail scatter
         if self.gaze_scatter is None:
             self.gaze_scatter = self.ax_gaze.scatter(
                 gaze_data[:, 0],
@@ -553,6 +559,23 @@ class GazeDataCanvas(FigureCanvas):
                 self.gaze_scatter.set_sizes(self.sizes[-n:])
                 self.gaze_scatter.set_array(self.colors[-n:])
             self.gaze_scatter.set_offsets(gaze_data)
+
+        # Current position marker
+        current_pos = gaze_data[-1:]
+        if self.gaze_current is None:
+            self.gaze_current = self.ax_gaze.scatter(
+                current_pos[:, 0],
+                current_pos[:, 1],
+                s=100,
+                color="red",
+                edgecolors="black",
+                linewidths=1,
+                marker="o",
+                zorder=3,
+            )
+            self.gaze_current.set_animated(True)
+        else:
+            self.gaze_current.set_offsets(current_pos)
 
     def datas_callback(
         self, datas: Sequence[GazeData], batch_update: bool = False
@@ -708,13 +731,23 @@ class ReplayData:
             resampled_drone_df = self._resample_df(drone_df, "timestamp")
             self.drones_data.append(resampled_drone_df)
 
-    def _resample_df(self, df: pd.DataFrame, timestamp_col: str) -> pd.DataFrame:
+    def _resample_df(
+        self,
+        df: pd.DataFrame,
+        timestamp_col: str,
+        method: str = "nearest",
+    ) -> pd.DataFrame:
         """
-        Resample a dataframe to the common timestamps using nearest neighbor
+        Resample a dataframe to the common timestamps.
+
+        When the target sampling rate is higher than the source data rate,
+        linear interpolation is used automatically to fill in-between samples.
+        Otherwise nearest-neighbor reindexing is used.
 
         Args:
             df: The dataframe to resample
             timestamp_col: The name of the timestamp column in the dataframe
+            method: Resampling method ("nearest" or "interpolate")
 
         Returns:
             pd.DataFrame: The resampled dataframe aligned to the common timestamps
@@ -722,11 +755,40 @@ class ReplayData:
         if df.empty:
             return df
         if not df[timestamp_col].is_unique:
-            df.drop_duplicates(timestamp_col, inplace=True)
-        df = df.set_index(timestamp_col)
-        resampled = df.reindex(
-            self.timestamps, method="nearest", tolerance=2 * 1000 / self._sampling_rate
+            df = df.drop_duplicates(timestamp_col)
+
+        # Estimate source data rate from median timestamp delta
+        source_dt = df[timestamp_col].diff().median()
+        target_dt = 1000.0 / self._sampling_rate
+        needs_interpolation = (
+            method == "interpolate" or target_dt < source_dt * 0.9
         )
+
+        df = df.set_index(timestamp_col)
+
+        if needs_interpolation:
+            src_ts = df.index.values.astype(np.float64)
+            result = {}
+            for col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    result[col] = np.interp(
+                        self.timestamps, src_ts, df[col].values
+                    )
+                else:
+                    # Non-numeric columns: forward-fill via nearest
+                    idx = np.searchsorted(src_ts, self.timestamps).clip(
+                        0, len(src_ts) - 1
+                    )
+                    result[col] = df[col].values[idx]
+            resampled = pd.DataFrame(result, index=self.timestamps)
+            resampled.index.name = timestamp_col
+        else:
+            resampled = df.reindex(
+                self.timestamps,
+                method="nearest",
+                tolerance=2 * 1000 / self._sampling_rate,
+            )
+
         resampled = resampled.reset_index()
         return resampled
 
