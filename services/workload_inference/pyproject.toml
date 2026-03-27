@@ -12,7 +12,11 @@ dependencies = [
     "debugpy",
     "PyYaml",
     "PyQt6",
-    "requests"
+    "requests",
+    "pywavelets>=1.9.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "pytorch-tabnet>=4.1.0",
 ]
 
 [dependency-groups]
@@ -27,6 +31,19 @@ dev = [
 workload_inference = "workload_inference.main:main"
 visualize_task = "workload_inference.visualize:main"
 generate_data = "workload_inference.test_data:main"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126" },
+]
+torchvision = [
+    { index = "pytorch-cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [tool.black]
 line_length = 88
