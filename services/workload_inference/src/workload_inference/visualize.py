@@ -41,6 +41,9 @@ from workload_inference.inference import (
     WorkloadInferenceEngine,
 )
 
+# Debug flag: set to True to populate canvases with mock data on startup
+DEBUG_MOCKUP_DATA = False
+
 SPLINE_TRAJECTORY_FILE = DATA_DIR / "spline_trajectory.csv"
 DRONE_COLORS = [
     "#1f77b4",
@@ -363,23 +366,6 @@ class GazeDataCanvas(FigureCanvas):
         # Pre-allocated padded validity array for imshow (avoids alloc each frame)
         self._validity_padded = np.full((2, plotting_window), -1, dtype=int)
 
-        # TEST data
-        d = np.linspace(3.0, 4.0, plotting_window)
-        for i in range(plotting_window):
-            self._validity_buf[i] = (
-                int(i > plotting_window // 2),
-                int(i < plotting_window // 2),
-            )
-            self._pupil_buf[i] = (d[i], np.random.rand() + 3.5)
-        # Create a circle trace of gaze points counter clockwise starting from top
-        for i in range(plotting_window):
-            angle = 2 * np.pi * (i / plotting_window)
-            x = (self.screen_width / 2) + (self.screen_width / 4) * np.sin(angle)
-            y = (self.screen_height / 2) - (self.screen_height / 4) * np.cos(angle)
-            self._gaze_buf[i] = (x, y)
-        self._buf_len = plotting_window
-        self._buf_idx = 0
-
         # Blit objects
         self.pupil_hist_lines: list[Line2D] = []
         self.validity_img: AxesImage | None = None
@@ -403,13 +389,35 @@ class GazeDataCanvas(FigureCanvas):
         self.update_eye_validity()
         self.update_gaze_trace()
 
+        # Populate with test data if debug mode is enabled
+        if DEBUG_MOCKUP_DATA:
+            self._populate_test_data(plotting_window)
+
         # Blitting hooks
         self.mpl_connect("draw_event", self._on_draw)
         self.mpl_connect("resize_event", self._on_resize)
-        self._init_blit()
         self.fig.tight_layout(pad=2.0)
+        self._init_blit()
 
         self._timer.start(1000 // self.update_freq)
+
+    def _populate_test_data(self, plotting_window: int) -> None:
+        """Populate buffers with test data for debugging."""
+        d = np.linspace(3.0, 4.0, plotting_window)
+        for i in range(plotting_window):
+            self._validity_buf[i] = (
+                int(i > plotting_window // 2),
+                int(i < plotting_window // 2),
+            )
+            self._pupil_buf[i] = (d[i], np.random.rand() + 3.5)
+        # Create a circle trace of gaze points counter clockwise starting from top
+        for i in range(plotting_window):
+            angle = 2 * np.pi * (i / plotting_window)
+            x = (self.screen_width / 2) + (self.screen_width / 4) * np.sin(angle)
+            y = (self.screen_height / 2) - (self.screen_height / 4) * np.cos(angle)
+            self._gaze_buf[i] = (x, y)
+        self._buf_len = plotting_window
+        self._buf_idx = 0
 
     def _init_plots(self):
         """Initialize plot styling and labels"""
@@ -448,9 +456,9 @@ class GazeDataCanvas(FigureCanvas):
         if self.gaze_current is not None:
             self.gaze_current.set_animated(True)
 
-        self.draw()
-        self._background = self.copy_from_bbox(self.fig.bbox)
-        self._blit_ready = True
+        self.draw()  # Draw to render axes, labels, and titles
+        self._background = self.copy_from_bbox(self.fig.bbox)  # Cache for blitting
+        self._blit_ready = True  # Ready to blit from this point on
 
     def _on_draw(self, _event):
         """Cache background on draw events"""
@@ -465,7 +473,7 @@ class GazeDataCanvas(FigureCanvas):
     def _blit_update(self):
         """Fast redraw using blitting"""
         if not self._blit_ready or self._background is None:
-            self.draw_idle()
+            self.draw()
             return
 
         self.restore_region(self._background)
@@ -628,6 +636,7 @@ class GazeDataCanvas(FigureCanvas):
                 self._buf_len += 1
 
 
+
 class WorkloadDisplayWidget(QWidget):
     """Widget displaying real-time cognitive workload estimation.
 
@@ -763,7 +772,8 @@ class WorkloadDisplayWidget(QWidget):
         root.addLayout(bottom_row, 0)
 
         self.setMinimumHeight(140)
-        self._add_mockup_data()
+        if DEBUG_MOCKUP_DATA:
+            self._add_mockup_data()
 
     def _init_history_plot(self):
         ax = self._history_ax
