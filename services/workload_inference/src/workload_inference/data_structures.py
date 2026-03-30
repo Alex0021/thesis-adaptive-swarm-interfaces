@@ -316,6 +316,17 @@ class ExperimentState(Enum):
 
 
 @dataclass
+class InferenceRecord:
+    timestamp: int
+    prob_low: float
+    prob_medium: float
+    prob_high: float
+    raw_state: int
+    filtered_state: int
+    nback_level: int
+
+
+@dataclass
 class ExperimentStatus:
     previous_state: ExperimentState
     current_state: ExperimentState

@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -25,11 +26,12 @@ from workload_inference.data_structures import (
     ExperimentState,
     ExperimentStatus,
     GazeData,
+    InferenceRecord,
     NBackData,
 )
+from workload_inference.inference import InferenceSettings, WorkloadInferenceEngine
 from workload_inference.py_receiver import SMReceiver, SMReceiverCircularBuffer
 from workload_inference.utilities import ExperimentDataWriter
-from workload_inference.inference import InferenceSettings, WorkloadInferenceEngine
 from workload_inference.visualize import (
     DroneDataCanvas,
     GazeDataCanvas,
@@ -42,9 +44,11 @@ SAMPLE_CONFIG_FILE_NAME = "sample_experiment.yaml"
 GAZE_DATA_FILE_NAME = "gaze_data.csv"
 DRONE_DATA_FILE_NAME = "drone_data.csv"
 NBACK_DATA_FILE_NAME = "nback_data.csv"
+INFERENCE_DATA_FILE_NAME = "inference_data.csv"
 GAZE_CSV_HEADER = GazeData.__annotations__.keys()
 DRONE_CSV_HEADER = DroneData.__annotations__.keys()
 NBACK_CSV_HEADER = NBackData.__annotations__.keys()
+INFERENCE_CSV_HEADER = InferenceRecord.__annotations__.keys()
 EXPERIMENT_STATUS_UPDATE_RATE_MS = 500
 
 # SM Block constants
@@ -76,6 +80,7 @@ class ExperimentManager:
         # Data writers
         self._gaze_data_writer: ExperimentDataWriter | None = None
         self._drone_data_writer: ExperimentDataWriter | None = None
+        self._inference_data_writer: ExperimentDataWriter | None = None
         self._current_folder: Path | None = None
 
         # Experiment status
@@ -192,6 +197,10 @@ class ExperimentManager:
             self._drone_data_writer = ExperimentDataWriter(
                 header=DRONE_CSV_HEADER, name="drone_data"
             )
+        if self._inference_data_writer is None:
+            self._inference_data_writer = ExperimentDataWriter(
+                header=INFERENCE_CSV_HEADER, name="inference_data"
+            )
 
     def initialize_listeners(self) -> None:
         if self._gaze_receiver is not None and self._gaze_data_writer is not None:
@@ -272,6 +281,16 @@ class ExperimentManager:
             ),
             recursive=True,
         )
+        existing_files += glob.glob(
+            str(
+                self.base_folder
+                / exp_name
+                / participant_uid
+                / "**"
+                / INFERENCE_DATA_FILE_NAME
+            ),
+            recursive=True,
+        )
 
         if existing_files and not overwrite:
             raise FileExistsError(
@@ -315,9 +334,15 @@ class ExperimentManager:
                     self._drone_data_writer.new_file(
                         self._current_folder / DRONE_DATA_FILE_NAME
                     )
+                    if self._inference_data_writer is not None:
+                        self._inference_data_writer.new_file(
+                            self._current_folder / INFERENCE_DATA_FILE_NAME
+                        )
                     # Start recording
                     self._gaze_data_writer.start()
                     self._drone_data_writer.start()
+                    if self._inference_data_writer is not None:
+                        self._inference_data_writer.start()
                     self.start_receivers()
             elif new_status.current_state == ExperimentState.NBackPractice:
                 # Set folder
@@ -333,6 +358,11 @@ class ExperimentManager:
                         self._current_folder / GAZE_DATA_FILE_NAME
                     )
                     self._gaze_data_writer.start()
+                if self._inference_data_writer is not None:
+                    self._inference_data_writer.new_file(
+                        self._current_folder / INFERENCE_DATA_FILE_NAME
+                    )
+                    self._inference_data_writer.start()
                 self.start_receivers()
                 self._request_nback_dump = True
             elif new_status.current_state == ExperimentState.Trial:
@@ -355,6 +385,11 @@ class ExperimentManager:
                         self._current_folder / DRONE_DATA_FILE_NAME
                     )
                     self._drone_data_writer.start()
+                if self._inference_data_writer is not None:
+                    self._inference_data_writer.new_file(
+                        self._current_folder / INFERENCE_DATA_FILE_NAME
+                    )
+                    self._inference_data_writer.start()
                 self.start_receivers()
                 self._request_nback_dump = True
             else:
@@ -363,6 +398,8 @@ class ExperimentManager:
                     self._gaze_data_writer.stop()
                 if self._drone_data_writer is not None:
                     self._drone_data_writer.stop()
+                if self._inference_data_writer is not None:
+                    self._inference_data_writer.stop()
                 self.dump_latest_nback_data()
 
         self._last_status = new_status
@@ -378,6 +415,28 @@ class ExperimentManager:
             )
             return
         self.nback_latest_datas = datas
+
+    def inference_callback(
+        self, raw_class: int, filtered_class: int, probabilities: np.ndarray
+    ) -> None:
+        """Callback to receive inference results and write them to CSV."""
+        if self._inference_data_writer is None:
+            return
+        nback_level = (
+            self._current_status.current_nback_level
+            if self._current_status is not None
+            else -1
+        )
+        record = InferenceRecord(
+            timestamp=int(time.time() * 1000),
+            prob_low=float(probabilities[0]),
+            prob_medium=float(probabilities[1]),
+            prob_high=float(probabilities[2]),
+            raw_state=raw_class,
+            filtered_state=filtered_class,
+            nback_level=nback_level,
+        )
+        self._inference_data_writer.datas_callback([record])
 
     def dump_latest_nback_data(self) -> None:
         """Dump the latest N-back data into a csv file."""
@@ -452,6 +511,8 @@ class ExperimentManager:
             self._gaze_data_writer.stop()
         if self._drone_data_writer is not None:
             self._drone_data_writer.stop()
+        if self._inference_data_writer is not None:
+            self._inference_data_writer.stop()
         self._api_thread_running = False
         if self._api_thread is not None and self._api_thread.is_alive():
             self._api_thread.join(timeout=2)
@@ -856,6 +917,9 @@ class ExperimentManagerWindow(QMainWindow):
                 "Drone receiver is not initialized. "
                 "Cannot attach drone visualizer listener."
             )
+        self._workload_engine.register_listener(
+            self.experiment_manager.inference_callback
+        )
 
     def closeEvent(self, event: Any) -> None:
         """Handle QMainWindow close events and perform cleanup."""

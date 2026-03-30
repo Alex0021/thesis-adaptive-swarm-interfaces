@@ -1,6 +1,13 @@
+import contextlib
 import logging
 import os
 import time
+
+# Import torch before PyQt6 to avoid DLL conflicts on Windows
+with contextlib.suppress(ImportError):
+    import torch  # noqa: F401
+
+os.environ["QT_API"] = "PyQt6"  # Ensure PyQt6 is used for matplotlib backend
 
 import debugpy
 import numpy as np
