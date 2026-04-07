@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -68,6 +69,9 @@ class DroneDataCanvas(FigureCanvas):
         max_history: int = 1000,
         plotting_window: int = 200,
         update_freq: int = 30,
+        vel_max: float = 5.0,
+        alt_min: float = 0.0,
+        alt_max: float = 10.0,
     ):
         """
         Initialize the canvas for drone position visualization.
@@ -78,19 +82,28 @@ class DroneDataCanvas(FigureCanvas):
             max_history (int): Maximum number of data points to keep in history.
             plotting_window (int): Number of data points to display per drone trail.
             update_freq (int): Frequency of plot updates in Hz.
+            vel_max (float): Upper bound for velocity bar in m/s.
+            alt_min (float): Lower bound for altitude bar in m.
+            alt_max (float): Upper bound for altitude bar in m.
         """
-        self.fig = Figure(figsize=(6, 6), dpi=100)
+        self.fig = Figure(figsize=(8, 6), dpi=100)
         super().__init__(self.fig)
         self.parent = parent
         self.num_drones = num_drones
         self.window_size = plotting_window
         self.update_freq = update_freq
+        self.vel_max = vel_max
+        self.alt_min = alt_min
+        self.alt_max = alt_max
         self.data_cb_cnt = 0
         self._timer = QTimer(parent)
         self._timer.timeout.connect(self._update_all)
 
-        # Initialize plot
-        self.ax = self.fig.add_subplot(1, 1, 1, adjustable="box")
+        # Initialize plot axes (main + stacked side bars)
+        # Main plot with padding for labels; bars stacked on right with spacing
+        self.ax = self.fig.add_axes([0.08, 0.13, 0.75, 0.78], adjustable="box")
+        self.ax_vel = self.fig.add_axes([0.90, 0.56, 0.07, 0.32])
+        self.ax_alt = self.fig.add_axes([0.90, 0.13, 0.07, 0.30])
 
         # Load spline trajectory for background track
         self._spline_x: NDArray[np.float64] | None = None
@@ -105,6 +118,10 @@ class DroneDataCanvas(FigureCanvas):
         # Blit objects: single scatter for all trails, single scatter for positions
         self.trail_scatter: PathCollection | None = None
         self.position_scatter: PathCollection | None = None
+        self.dead_scatter: PathCollection | None = None
+        self.heading_quiver: Any | None = None
+        self._vel_bar_rect: Any | None = None
+        self._alt_bar_rect: Any | None = None
         self._sizes_template = np.linspace(2, 20, plotting_window)
 
         # Pre-compute RGBA color arrays (trail + position) once
@@ -123,6 +140,13 @@ class DroneDataCanvas(FigureCanvas):
         self._cached_trail_colors: NDArray | None = None
         self._cached_trail_sizes: NDArray | None = None
         self._cached_point_count = -1
+
+        # State buffers for new features (alive flag, velocity, altitude, yaw)
+        self._alive = np.ones(num_drones, dtype=bool)  # alive state per drone
+        self._dead_pos = np.full((num_drones, 2), np.nan)  # last known (z, x) when died
+        self._last_vel = np.zeros((num_drones, 3))  # latest (vx, vy, vz)
+        self._last_alt = np.zeros(num_drones)  # latest position_y
+        self._last_yaw = np.zeros(num_drones)  # latest yaw (orientation_y)
 
         # Blitting state
         self._background = None
@@ -172,6 +196,20 @@ class DroneDataCanvas(FigureCanvas):
             # Invert X-axis for clockwise motion from left start
             self.ax.set_xlim(self._spline_z.max() + pad_z, self._spline_z.min() - pad_z)
 
+        # Velocity bar (right side)
+        self.ax_vel.set_xlim(0, 1)
+        self.ax_vel.set_ylim(0, self.vel_max)
+        self.ax_vel.set_xticks([])
+        self.ax_vel.set_title("Vel\n(m/s)", fontsize=8)
+        self.ax_vel.axhspan(0, self.vel_max, color="lightgray", zorder=0)
+
+        # Altitude bar (right side)
+        self.ax_alt.set_xlim(0, 1)
+        self.ax_alt.set_ylim(self.alt_min, self.alt_max)
+        self.ax_alt.set_xticks([])
+        self.ax_alt.set_title("Alt\n(m)", fontsize=8)
+        self.ax_alt.axhspan(self.alt_min, self.alt_max, color="lightgray", zorder=0)
+
     def _init_blit(self):
         """Initialize blitting by caching the background"""
         if self.trail_scatter is not None:
@@ -205,6 +243,14 @@ class DroneDataCanvas(FigureCanvas):
             self.ax.draw_artist(self.trail_scatter)
         if self.position_scatter is not None:
             self.ax.draw_artist(self.position_scatter)
+        if self.dead_scatter is not None:
+            self.ax.draw_artist(self.dead_scatter)
+        if self.heading_quiver is not None:
+            self.ax.draw_artist(self.heading_quiver)
+        if self._vel_bar_rect is not None:
+            self.ax_vel.draw_artist(self._vel_bar_rect)
+        if self._alt_bar_rect is not None:
+            self.ax_alt.draw_artist(self._alt_bar_rect)
 
         self.blit(self.fig.bbox)
 
@@ -224,10 +270,12 @@ class DroneDataCanvas(FigureCanvas):
         current_offsets = np.empty((int((self._buf_lens > 0).sum()), 2))
         offset = 0
         cur_idx = 0
+        active_ids = []  # Track which drone IDs have data
         for drone_id in range(self.num_drones):
             n = self._buf_lens[drone_id]
             if n == 0:
                 continue
+            active_ids.append(drone_id)
             buf = self._buffers[drone_id]
             wi = self._buf_idx[drone_id]
             if n < self.window_size:
@@ -272,23 +320,184 @@ class DroneDataCanvas(FigureCanvas):
                 self.trail_scatter.set_sizes(self._cached_trail_sizes)
                 self.trail_scatter.set_facecolors(self._cached_trail_colors)
 
-        # Current position markers (single artist for all drones)
-        active_mask = self._buf_lens > 0
-        current_colors = self._pos_rgba[active_mask]
-        if self.position_scatter is None:
-            self.position_scatter = self.ax.scatter(
-                current_offsets[:, 0],
-                current_offsets[:, 1],
-                s=80,
-                c=current_colors,
-                edgecolors="black",
-                linewidths=1,
-                marker="o",
-                zorder=2,
-            )
-            self.position_scatter.set_animated(True)
+        # Separate alive and dead drones
+        active_ids = np.array(active_ids, dtype=int)
+        alive_mask = np.array([self._alive[i] for i in active_ids], dtype=bool)
+        dead_mask = ~alive_mask
+
+        # Current position markers (only alive drones)
+        if alive_mask.any():
+            alive_indices = np.where(alive_mask)[0]
+            alive_current_offsets = current_offsets[alive_indices]
+            alive_colors = self._pos_rgba[active_ids[alive_indices]]
+            if self.position_scatter is None:
+                self.position_scatter = self.ax.scatter(
+                    alive_current_offsets[:, 0],
+                    alive_current_offsets[:, 1],
+                    s=80,
+                    c=alive_colors,
+                    edgecolors="black",
+                    linewidths=1,
+                    marker="o",
+                    zorder=2,
+                )
+                self.position_scatter.set_animated(True)
+            else:
+                self.position_scatter.set_offsets(alive_current_offsets)
         else:
-            self.position_scatter.set_offsets(current_offsets)
+            # No alive drones; clear position scatter
+            if self.position_scatter is not None:
+                self.position_scatter.set_offsets(np.empty((0, 2)))
+
+        # Dead drone markers (X symbol at last known position)
+        if dead_mask.any():
+            dead_ids = active_ids[dead_mask]
+            dead_pos = self._dead_pos[dead_ids]
+            # Filter out NaN positions
+            valid_mask = ~np.isnan(dead_pos).any(axis=1)
+            if valid_mask.any():
+                dead_pos = dead_pos[valid_mask]
+                if self.dead_scatter is None:
+                    self.dead_scatter = self.ax.scatter(
+                        dead_pos[:, 0],
+                        dead_pos[:, 1],
+                        s=120,
+                        c="red",
+                        marker="x",
+                        linewidths=2,
+                        zorder=3,
+                    )
+                    self.dead_scatter.set_animated(True)
+                else:
+                    self.dead_scatter.set_offsets(dead_pos)
+            else:
+                # No valid dead positions
+                if self.dead_scatter is not None:
+                    self.dead_scatter.set_offsets(np.empty((0, 2)))
+        else:
+            # No dead drones
+            if self.dead_scatter is not None:
+                self.dead_scatter.set_offsets(np.empty((0, 2)))
+
+        # Swarm heading arrow (mean yaw direction at swarm contour)
+        if alive_mask.any():
+            alive_indices = np.where(alive_mask)[0]
+            # Use current positions from the position scatter data
+            alive_positions = current_offsets[alive_indices]
+            cx = np.mean(alive_positions[:, 0])
+            cy = np.mean(alive_positions[:, 1])
+
+            alive_ids_arr = active_ids[alive_mask]
+            # Use mean yaw (orientation_y) for heading direction
+            yaws = self._last_yaw[alive_ids_arr]
+            mean_yaw = float(np.mean(yaws))
+
+            # Calculate swarm radius for contour offset
+            distances = np.linalg.norm(alive_positions - np.array([cx, cy]), axis=1)
+            swarm_radius = np.mean(distances) if distances.size > 0 else 1.0
+
+            # Arrow parameters
+            ax_range = abs(self.ax.get_xlim()[1] - self.ax.get_xlim()[0])
+            triangle_size = ax_range * 0.01  # Smaller triangle
+            offset_dist = swarm_radius * 1.5  # Position at swarm contour
+            spacing = ax_range * 0.01  # Extra spacing from contour
+
+            # Position triangle at swarm contour in the heading direction
+            offset_x = (offset_dist + spacing) * np.cos(mean_yaw)
+            offset_y = (offset_dist + spacing) * np.sin(mean_yaw)
+            center_x = cx + offset_x
+            center_y = cy + offset_y
+
+            # Create filled triangle pointing in yaw direction
+            if self.heading_quiver is not None:
+                self.heading_quiver.remove()
+            from matplotlib.patches import Polygon
+
+            # Triangle tip points in yaw direction, base perpendicular
+            tip_x = center_x + triangle_size * np.cos(mean_yaw)
+            tip_y = center_y + triangle_size * np.sin(mean_yaw)
+
+            # Base vertices (perpendicular to yaw, behind the tip)
+            perp_angle = mean_yaw + np.pi / 2
+            base_offset = triangle_size * 0.8
+            base_x = center_x - triangle_size * np.cos(mean_yaw)
+            base_y = center_y - triangle_size * np.sin(mean_yaw)
+
+            left_x = base_x + base_offset * np.cos(perp_angle)
+            left_y = base_y + base_offset * np.sin(perp_angle)
+            right_x = base_x - base_offset * np.cos(perp_angle)
+            right_y = base_y - base_offset * np.sin(perp_angle)
+
+            vertices = np.array(
+                [
+                    [tip_x, tip_y],
+                    [left_x, left_y],
+                    [right_x, right_y],
+                ]
+            )
+
+            self.heading_quiver = Polygon(
+                vertices,
+                closed=True,
+                facecolor="black",
+                edgecolor="black",
+                linewidth=0.5,
+                zorder=4,
+            )
+            self.ax.add_patch(self.heading_quiver)
+            self.heading_quiver.set_animated(True)
+        else:
+            # No alive drones; remove heading arrow
+            if self.heading_quiver is not None:
+                self.heading_quiver.remove()
+                self.heading_quiver = None
+
+        # Velocity and altitude bars
+        if alive_mask.any():
+            alive_ids_arr = active_ids[alive_mask]
+            # Use recorded velocity data
+            vel_data = self._last_vel[alive_ids_arr]
+            speeds = (
+                np.linalg.norm(vel_data, axis=1) if vel_data.size > 0 else np.array([])
+            )
+            speeds = speeds[np.isfinite(speeds)]
+            mean_speed = float(np.mean(speeds)) if speeds.size > 0 else 0.0
+
+            alt_data = self._last_alt[alive_ids_arr]
+            alt_data = alt_data[np.isfinite(alt_data)]
+            mean_alt = float(np.mean(alt_data)) if alt_data.size > 0 else 0.0
+
+            vel_h = np.clip(mean_speed, 0, self.vel_max)
+            alt_h = np.clip(mean_alt, self.alt_min, self.alt_max)
+
+            # Remove and recreate bars for consistent updates
+            if self._vel_bar_rect is not None:
+                self._vel_bar_rect.remove()
+            if self._alt_bar_rect is not None:
+                self._alt_bar_rect.remove()
+
+            from matplotlib.patches import Rectangle
+
+            self._vel_bar_rect = Rectangle((0, 0), 1, vel_h, color="#2196F3")
+            self.ax_vel.add_patch(self._vel_bar_rect)
+            self._vel_bar_rect.set_animated(True)
+
+            self._alt_bar_rect = Rectangle(
+                (0, self.alt_min),
+                1,
+                alt_h - self.alt_min,
+                color="#4CAF50",
+            )
+            self.ax_alt.add_patch(self._alt_bar_rect)
+            self._alt_bar_rect.set_animated(True)
+        else:
+            # No alive drones; remove bars
+            if self._vel_bar_rect is not None:
+                self._vel_bar_rect.remove()
+                self._vel_bar_rect = None
+            if self._alt_bar_rect is not None:
+                self._alt_bar_rect.remove()
+                self._alt_bar_rect = None
 
     def datas_callback(
         self, datas: Sequence[DroneData], batch_update: bool = False
@@ -313,6 +522,19 @@ class DroneDataCanvas(FigureCanvas):
                 self._buf_idx[drone_id] = (wi + 1) % self.window_size
                 if self._buf_lens[drone_id] < self.window_size:
                     self._buf_lens[drone_id] += 1
+
+                # Store alive status, velocity, altitude, and yaw
+                self._alive[drone_id] = bool(drone_data.alive)
+                self._last_vel[drone_id, 0] = drone_data.velocity_x
+                self._last_vel[drone_id, 1] = drone_data.velocity_y
+                self._last_vel[drone_id, 2] = drone_data.velocity_z
+                self._last_alt[drone_id] = float(drone_data.position_y)
+                self._last_yaw[drone_id] = float(drone_data.orientation_y)
+
+                # Track last known position for dead drones
+                if drone_data.alive:
+                    self._dead_pos[drone_id, 0] = float(drone_data.position_z)
+                    self._dead_pos[drone_id, 1] = float(drone_data.position_x)
 
 
 class GazeDataCanvas(FigureCanvas):
@@ -636,7 +858,6 @@ class GazeDataCanvas(FigureCanvas):
                 self._buf_len += 1
 
 
-
 class WorkloadDisplayWidget(QWidget):
     """Widget displaying real-time cognitive workload estimation.
 
@@ -752,9 +973,7 @@ class WorkloadDisplayWidget(QWidget):
             bar.setValue(0)
             bar.setFormat("")
             color = WORKLOAD_COLORS[cls_idx]
-            bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background-color: {color}; }}"
-            )
+            bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
             bar.setFixedHeight(16)
             bar_row.addWidget(bar, 1)
             self._prob_bars.append(bar)
@@ -787,12 +1006,21 @@ class WorkloadDisplayWidget(QWidget):
         ax.set_xlim(-self.HISTORY_WINDOW_SEC, 0)
 
         (self._line_raw,) = ax.plot(
-            [], [],
-            "o", markersize=3, alpha=0.4, label="Raw", color="steelblue",
+            [],
+            [],
+            "o",
+            markersize=3,
+            alpha=0.4,
+            label="Raw",
+            color="steelblue",
         )
         (self._line_filtered,) = ax.plot(
-            [], [],
-            "-", linewidth=2, label="Filtered", color="darkorange",
+            [],
+            [],
+            "-",
+            linewidth=2,
+            label="Filtered",
+            color="darkorange",
         )
         ax.legend(fontsize=6, loc="upper left")
 
@@ -833,10 +1061,7 @@ class WorkloadDisplayWidget(QWidget):
 
             # Trim to the time window
             cutoff = now - self.HISTORY_WINDOW_SEC
-            while (
-                self._history_timestamps
-                and self._history_timestamps[0] < cutoff
-            ):
+            while self._history_timestamps and self._history_timestamps[0] < cutoff:
                 self._history_timestamps.pop(0)
                 self._history_raw.pop(0)
                 self._history_filtered.pop(0)
@@ -1196,7 +1421,7 @@ class ExperimentDataReplayWindow(QMainWindow):
         # Workload inference engine + display
         from workload_inference.inference import InferenceSettings
 
-        self.workload_engine = WorkloadInferenceEngine(
+        self.workload_engine = WorkloadInferenceEngine.create(
             model_path=model_path,
             settings=InferenceSettings(
                 window_size_samples=600,  # 10s at 60 Hz
@@ -1347,13 +1572,21 @@ Examples:
             DATA_DIR / "experiments" / "experiment_nback" / "ALH0" / "FlyingPractice"
         )
 
+    if args.model:
+        model_path = Path(args.model)
+        if not model_path.is_absolute():
+            model_path = DATA_DIR / args.model
+        if not model_path.is_file():
+            print(f"Error: Model file not found: {model_path}")
+            sys.exit(1)
+
     if not replay_folder.exists():
         print(f"Error: Experiment folder not found: {replay_folder}")
         sys.exit(1)
 
     app = QApplication(sys.argv)
     window = ExperimentDataReplayWindow(
-        trial_folder=replay_folder, model_path=args.model
+        trial_folder=replay_folder, model_path=model_path
     )
     window.show()
 
