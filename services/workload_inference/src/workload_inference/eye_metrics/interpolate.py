@@ -5,13 +5,15 @@ def interpolate_pupil_data(
     eye_df: pd.DataFrame,
     gaps_df: pd.DataFrame,
     column: str = "pupil_diameter",
-    max_gap: int = 300,
+    max_gap_ms: int = 300,
 ) -> pd.DataFrame:
-    return interpolate_eye_data(eye_df, gaps_df, columns=[column], max_gap=max_gap)
+    return interpolate_eye_data(
+        eye_df, gaps_df, columns=[column], max_gap_ms=max_gap_ms
+    )
 
 
 def interpolate_eye_data(
-    eye_df: pd.DataFrame, gaps_df: pd.DataFrame, columns: list[str], max_gap: int
+    eye_df: pd.DataFrame, gaps_df: pd.DataFrame, columns: list[str], max_gap_ms: int
 ) -> pd.DataFrame:
     interpolated_df = eye_df[["timestamp_sec"] + columns].copy()
     interpolated_df["timestamp_sec"] = pd.to_timedelta(
@@ -25,7 +27,7 @@ def interpolate_eye_data(
         "timestamp_sec"
     ].dt.total_seconds()
     # Remove zones that exceed the interpolation threshold
-    for _, row in gaps_df[gaps_df["duration_ms"] >= max_gap].iterrows():
+    for _, row in gaps_df[gaps_df["duration_ms"] >= max_gap_ms].iterrows():
         interpolated_df = interpolated_df[
             (interpolated_df["timestamp_sec"] < row["start_timestamp"])
             | (interpolated_df["timestamp_sec"] > row["stop_timestamp"])
@@ -42,10 +44,10 @@ def interpolate_gaze(
     eye_df: pd.DataFrame,
     gaps_df: pd.DataFrame,
     columns: list[str] = ["gaze_angle_delta_deg"],
-    max_gap: int = 300,
+    max_gap_ms: int = 300,
 ) -> pd.DataFrame:
     interpolated_df = interpolate_eye_data(
-        eye_df, gaps_df, columns=columns, max_gap=max_gap
+        eye_df, gaps_df, columns=columns, max_gap_ms=max_gap_ms
     )
     # Also remove blinks from the interpolated gaze angle dataframe
     for _, row in gaps_df[gaps_df["is_blink"]].iterrows():

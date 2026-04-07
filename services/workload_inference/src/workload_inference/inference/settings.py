@@ -25,17 +25,25 @@ class InferenceSettings:
     uses the exact same feature set and window parameters.
     """
 
+    model_type: str = "tabnet"  # "tabnet" | "sklearn" | "tcn"
     feature_set: str = "ipa_wavelets"
     sample_rate: float = 60.0
     window_size_samples: int = 300  # 5s at 60 Hz
     inference_interval_samples: int = 60  # 1s at 60 Hz
     wavelet_level: int = 4
     min_valid_ratio: float = 0.5
-    rolling_buffer_multiplier: int = 2
+    pupil_frequency_buffer_size: int = -1
+    pupil_ripa2_smoothing: float = 1.0  # seconds
+    pupil_wavelet_smoothing: float = 1.0  # seconds
     smoothing_predictions: int = 5
     schmitt_min_fraction: float = 0.6
     schmitt_min_consecutive: int = 3
+    schmitt_warmup_windows: int = 5
     feature_columns: list[str] = field(default_factory=list)
+    # Raw time-series columns fed to sequence models (e.g. TCN).
+    # Each entry must match a column present in the preprocessed pupil DataFrame
+    # (e.g. "pupil_diameter", "openness").  Defaults to ["pupil_diameter"].
+    raw_feature_columns: list[str] = field(default_factory=list)
 
     # -- derived helpers (seconds) -----------------------------------------
 
@@ -48,8 +56,12 @@ class InferenceSettings:
         return self.inference_interval_samples / self.sample_rate
 
     @property
-    def rolling_buffer_size(self) -> int:
-        return self.window_size_samples * self.rolling_buffer_multiplier
+    def rolling_buffer_samples(self) -> int:
+        return (
+            self.pupil_frequency_buffer_size
+            if self.pupil_frequency_buffer_size > 0
+            else self.window_size_samples
+        )
 
     # -- persistence --------------------------------------------------------
 

@@ -1,6 +1,11 @@
 """Online workload inference engine package."""
 
-from .engine import WorkloadInferenceEngine
+from .engine import (
+    SklearnInferenceEngine,
+    TabNetInferenceEngine,
+    TCNInferenceEngine,
+    WorkloadInferenceEngine,
+)
 from .filters import SmoothingSchmittFilter, WorkloadFilter
 from .online_stats import OnlinePupilStats, WelfordNormalizer
 from .settings import InferenceSettings
@@ -17,4 +22,7 @@ __all__ = [
     "WORKLOAD_LABELS",
     "WorkloadFilter",
     "WorkloadInferenceEngine",
+    "TabNetInferenceEngine",
+    "SklearnInferenceEngine",
+    "TCNInferenceEngine",
 ]

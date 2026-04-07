@@ -1,14 +1,34 @@
 """Online cognitive workload inference engine.
 
-Accumulates streaming GazeData, preprocesses sliding windows, extracts
-pupil-based features, and runs a trained classifier to estimate workload
-level (low / medium / high).
+Accumulates streaming GazeData, preprocesses sliding windows, and runs a
+trained classifier to estimate workload level (low / medium / high).
+
+Architecture
+------------
+``WorkloadInferenceEngine`` is an abstract base class that owns all shared
+infrastructure: gaze buffering, preprocessing, smoothing, and notification.
+Two abstract methods must be implemented by each concrete subclass:
+
+- :meth:`_load_model`                – load the model artefact from disk.
+- :meth:`_extract_features_and_predict` – build the model input and return a
+  ``(pred_class, proba)`` pair, or ``None`` to skip the window.
+
+Concrete subclasses:
+
+- :class:`TabNetInferenceEngine`  – PyTorch-TabNet (``.zip``)
+- :class:`SklearnInferenceEngine` – scikit-learn compatible (``.pkl`` / ``.joblib``)
+- :class:`TCNInferenceEngine`     – Temporal Convolutional Network (``.pt`` / ``.pth``)
+
+Use :meth:`WorkloadInferenceEngine.create` to pick the right subclass from
+``settings.model_type`` automatically.
 """
 
 import logging
 import re
 import threading
 import time
+import warnings
+from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -21,11 +41,7 @@ from workload_inference.eye_metrics.features import FEATURE_SETS
 from workload_inference.eye_metrics.gaze_utils import detect_gaps_and_blinks
 from workload_inference.eye_metrics.interpolate import interpolate_pupil_data
 from workload_inference.eye_metrics.preprocessing import select_best_eye
-from workload_inference.eye_metrics.pupil_utils import (
-    LHIPA,
-    RIPA2,
-    WaveletFeature,
-)
+from workload_inference.eye_metrics.pupil_utils import LHIPA, RIPA2, WaveletFeature
 
 from .filters import SmoothingSchmittFilter, WorkloadFilter
 from .online_stats import OnlinePupilStats, WelfordNormalizer
@@ -35,28 +51,28 @@ logger = logging.getLogger(__name__)
 
 # Preprocessing thresholds (matching offline pipeline)
 CONFIDENCE_THRESHOLD = 0.5
-DURATION_THRESHOLD_SEC = 100 / 1000
-INTERPOLATION_THRESHOLD_SEC = 300 / 1000
+BLINK_DURATION_MIN_THRESHOLD_MS = 100
+BLINK_SAMPLE_MARGIN_MS = 100
+MAX_GAP_THRESHOLD_INTERPOLATION_MS = 300
+MIN_NON_BLINK_GAP_RATIO_FOR_VALIDITY = 0.5
+""" If too much of the window is taken up by non-blink gaps, the window is invalid."""
+
+MIN_SAMPLES_FOR_INTERPOLATION = 20
+""" If fewer than this number of valid samples remain after filtering, skip 
+interpolation and downstream inference to avoid artefacts."""
 
 
-class WorkloadInferenceEngine:
-    """Online cognitive workload inference from streaming gaze data.
-
-    Accumulates GazeData samples, periodically preprocesses a sliding window,
-    extracts pupil-based features, and runs a trained classifier.
+class WorkloadInferenceEngine(ABC):
+    """Abstract base for online cognitive workload inference from streaming gaze data.
 
     Usage::
 
         settings = InferenceSettings.from_yaml("settings.yml")
-        engine = WorkloadInferenceEngine(
-            model_path="models/my_model.zip",
-            settings=settings,
-        )
-        engine.register_listener(my_display_callback)
+        engine = WorkloadInferenceEngine.create("models/my_model.zip", settings)
+        engine.register_listener(my_callback)
         gaze_receiver.register_listener(engine.gaze_datas_callback)
     """
 
-    # Sentinel value indicating no valid prediction has been made yet.
     UNKNOWN_CLASS: int = -1
 
     def __init__(
@@ -79,48 +95,39 @@ class WorkloadInferenceEngine:
             settings.feature_set, FEATURE_SETS["all"]
         )
 
-        # Filter
         if filter is None:
             filter = SmoothingSchmittFilter(
                 smoothing_predictions=settings.smoothing_predictions,
                 min_fraction=settings.schmitt_min_fraction,
                 min_consecutive=settings.schmitt_min_consecutive,
+                warmup_windows=settings.schmitt_warmup_windows,
             )
         self._filter = filter
 
-        # Model
         self._model = None
         self._model_type: str | None = None
         if model_path is not None:
             self._load_model(Path(model_path))
 
-        # Data buffer
-        self._raw_buffer: deque[GazeData] = deque(
-            maxlen=self._window_size_samples * 2
-        )
+        self._raw_buffer: deque[GazeData] = deque(maxlen=self._window_size_samples * 2)
         self._samples_since_last_inference = 0
 
-        # Running pupil stats for online outlier rejection
         self._pupil_stats = OnlinePupilStats()
 
-        # Persistent pupil feature extractors
-        buffer_size = settings.rolling_buffer_size
+        buffer_size = settings.rolling_buffer_samples
         self._ripa2 = RIPA2(
             buffer_size=buffer_size,
-            smoothing_window_s=settings.window_size_sec,
+            smoothing_window_s=settings.pupil_ripa2_smoothing,
             sample_rate=settings.sample_rate,
         )
-        self._lhipa = LHIPA(
-            buffer_size=buffer_size, sample_rate=settings.sample_rate
-        )
+        self._lhipa = LHIPA(buffer_size=buffer_size, sample_rate=settings.sample_rate)
         self._wavelet = WaveletFeature(
             level=settings.wavelet_level,
             buffer_size=buffer_size,
             sample_rate=settings.sample_rate,
         )
 
-        # Feature columns: if settings specifies them use those directly,
-        # otherwise resolve on first successful extraction.
+        # Resolved lazily on first extraction (feature-based engines only)
         if settings.feature_columns:
             self._feature_columns: list[str] | None = list(settings.feature_columns)
             self._normalizer: WelfordNormalizer | None = WelfordNormalizer(
@@ -130,7 +137,9 @@ class WorkloadInferenceEngine:
             self._feature_columns = None
             self._normalizer = None
 
-        # Prediction state
+        # Last valid feature vector used to impute bad values (NaN/inf)
+        self._last_feature_vector: np.ndarray | None = None
+
         self._prediction_history: deque[tuple[int, np.ndarray, float]] = deque(
             maxlen=200
         )
@@ -138,58 +147,54 @@ class WorkloadInferenceEngine:
         self._current_probabilities: np.ndarray = np.zeros(3)
         self._listeners: list[Callable[[int, int, np.ndarray], None]] = []
 
-        # Threading
         self._inference_lock = threading.Lock()
         self._inference_thread: threading.Thread | None = None
         self._last_inference_timestamp: float | None = None
 
         logger.info(
-            "WorkloadInferenceEngine initialized: window=%.1fs, interval=%.1fs, "
-            "features=%s, model=%s",
+            "%s initialized: window=%.1fs, interval=%.1fs, features=%s, model=%s",
+            type(self).__name__,
             settings.window_size_sec,
             settings.inference_interval_sec,
             settings.feature_set,
             model_path or "none",
         )
 
-    # ------------------------------------------------------------------
-    # Model loading
-    # ------------------------------------------------------------------
-
-    def _load_model(self, model_path: Path) -> None:
-        model_path = Path(model_path)
-        if not model_path.is_absolute():
-            model_path = model_path.resolve()
-        suffix = model_path.suffix.lower()
-
-        if suffix == ".zip" or model_path.with_suffix(".zip").exists():
-            try:
-                from pytorch_tabnet.tab_model import TabNetClassifier
-
-                self._model = TabNetClassifier(device_name="cpu")
-                self._model.load_model(model_path)
-                self._model_type = "tabnet"
-                logger.info("Loaded TabNet model from %s", model_path)
-            except ImportError:
-                logger.error(
-                    "pytorch_tabnet not installed. Cannot load TabNet model."
-                )
-                raise
-        elif suffix in (".pkl", ".joblib"):
-            import joblib
-
-            self._model = joblib.load(model_path)
-            self._model_type = "sklearn"
-            logger.info("Loaded sklearn model from %s", model_path)
-        else:
+    @classmethod
+    def create(
+        cls,
+        model_path: str | Path | None = None,
+        settings: InferenceSettings | None = None,
+        filter: WorkloadFilter | None = None,
+    ) -> WorkloadInferenceEngine:
+        """Instantiate the engine subclass specified by ``settings.model_type``."""
+        if settings is None:
+            settings = InferenceSettings()
+        engines = {
+            "tabnet": TabNetInferenceEngine,
+            "sklearn": SklearnInferenceEngine,
+            "tcn": TCNInferenceEngine,
+        }
+        engine_cls = engines.get(settings.model_type.lower())
+        if engine_cls is None:
             raise ValueError(
-                f"Unsupported model format: '{suffix}'. "
-                "Expected .zip (TabNet) or .pkl/.joblib (sklearn)."
+                f"Unknown model_type '{settings.model_type}'. "
+                f"Expected one of: {list(engines)}"
             )
+        return engine_cls(model_path, settings, filter)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    @abstractmethod
+    def _load_model(self, model_path: Path) -> None:
+        """Load the model artefact from *model_path* into ``self._model``."""
+
+    @abstractmethod
+    def _extract_features_and_predict(
+        self,
+        pupil_df: pd.DataFrame,
+        gaps_df: pd.DataFrame,
+        duration: float,
+    ) -> tuple[int, np.ndarray] | None:
+        """Build model input and return ``(pred_class, proba)``, or ``None`` to skip."""
 
     def register_listener(
         self, listener: Callable[[int, int, np.ndarray], None]
@@ -212,10 +217,7 @@ class WorkloadInferenceEngine:
 
         if self._samples_since_last_inference >= self._inference_interval_samples:
             self._samples_since_last_inference = 0
-            if (
-                self._inference_thread is not None
-                and self._inference_thread.is_alive()
-            ):
+            if self._inference_thread is not None and self._inference_thread.is_alive():
                 return
             snapshot = list(self._raw_buffer)[-self._window_size_samples :]
             self._inference_thread = threading.Thread(
@@ -225,21 +227,13 @@ class WorkloadInferenceEngine:
             )
             self._inference_thread.start()
 
-    # ------------------------------------------------------------------
-    # Inference pipeline
-    # ------------------------------------------------------------------
-
     def _run_inference_safe(self, snapshot: list[GazeData]) -> None:
-        """Top-level wrapper that ensures exceptions never escape the thread."""
         try:
             self._run_inference(snapshot)
         except Exception:
             logger.exception("Inference thread crashed")
 
     def _run_inference(self, snapshot: list[GazeData]) -> None:
-        """Run the full inference pipeline on a snapshot of gaze data."""
-        # Use only the portion of the buffer that actually contains data.
-        # At startup the buffer may have fewer samples than the full window.
         n_available = len(snapshot)
         min_samples = int(self._window_size_samples * self._min_valid_ratio)
         if n_available < min_samples:
@@ -251,91 +245,42 @@ class WorkloadInferenceEngine:
             return
 
         df = self._build_dataframe(snapshot)
-
         pupil_df, gaps_df = self._preprocess_online(df)
         if pupil_df.empty or len(pupil_df) < 50:
-            logger.debug(
-                "Skipping inference: insufficient samples after preprocessing"
-            )
+            logger.debug("Skipping inference: insufficient samples after preprocessing")
+            self._repeat_last_prediction()
             return
 
-        # Extract features
         duration = (
             pupil_df["timestamp_sec"].iloc[-1] - pupil_df["timestamp_sec"].iloc[0]
         )
         if duration <= 0:
             logger.debug("Skipping inference: zero-length window")
+            self._repeat_last_prediction()
             return
 
-        features = self._extract_blink_features(gaps_df, duration)
-        self._extract_pupil_realtime_features(pupil_df, features)
-
-        if not features:
-            logger.debug("Skipping inference: no features extracted")
+        result = self._extract_features_and_predict(pupil_df, gaps_df, duration)
+        if result is None:
+            self._repeat_last_prediction()
             return
 
-        if self._feature_columns is None:
-            self._resolve_feature_columns(features)
-
-        # Build feature vector -- missing features get NaN, not 0.0
-        feature_vector = np.array(
-            [features.get(col, np.nan) for col in self._feature_columns],
-            dtype=np.float64,
-        )
-
-        # If any feature is NaN, skip this window rather than silently
-        # substituting zeros which would distort the model.
-        nan_mask = np.isnan(feature_vector)
-        if nan_mask.any():
-            nan_cols = [
-                c
-                for c, is_nan in zip(self._feature_columns, nan_mask)
-                if is_nan
-            ]
-            logger.debug(
-                "Skipping inference: %d NaN features: %s",
-                len(nan_cols),
-                nan_cols,
-            )
-            return
-
-        # Replace inf with NaN then check again
-        feature_vector = np.where(
-            np.isinf(feature_vector), np.nan, feature_vector
-        )
-        if np.isnan(feature_vector).any():
-            logger.debug("Skipping inference: inf values in feature vector")
-            return
-
-        self._normalizer.update(feature_vector)
-        if self._normalizer.n >= 3:
-            feature_vector = self._normalizer.normalize(feature_vector)
-
-        if self._model is not None:
-            X = feature_vector.reshape(1, -1).astype(np.float32)
-            proba = self._model.predict_proba(X)[0]
-            pred_class = int(np.argmax(proba))
-        else:
-            # No model loaded -- report unknown rather than a fake class
-            proba = np.array([1 / 3, 1 / 3, 1 / 3])
-            pred_class = self.UNKNOWN_CLASS
-
+        pred_class, proba = result
         with self._inference_lock:
             self._prediction_history.append((pred_class, proba, time.time()))
         self._smooth_and_notify()
         self._last_inference_timestamp = time.time()
+
+    def _repeat_last_prediction(self) -> None:
+        """Re-emit the last known prediction when the current window is unusable."""
+        if self._prediction_history:
+            self._smooth_and_notify()
+            self._last_inference_timestamp = time.time()
 
     # ------------------------------------------------------------------
     # DataFrame construction
     # ------------------------------------------------------------------
 
     def _build_dataframe(self, samples: list[GazeData]) -> pd.DataFrame:
-        """Convert GazeData samples to a DataFrame for the preprocessing pipeline.
-
-        Only includes columns needed for pupil-based features.
-        Gaze point columns are kept structurally for future use but are not
-        required by the current feature set.
-        """
         rows = []
         start_ts = None
         for gaze in samples:
@@ -345,20 +290,16 @@ class WorkloadInferenceEngine:
             rows.append(
                 {
                     "timestamp_sec": ts_sec - start_ts,
-                    # Gaze points -- kept for architecture, not used by
-                    # current pupil-only feature set
                     "left_gaze_point_x": float(gaze.left_gaze_point_x),
                     "left_gaze_point_y": float(gaze.left_gaze_point_y),
                     "left_gaze_point_z": float(gaze.left_gaze_point_z),
                     "right_gaze_point_x": float(gaze.right_gaze_point_x),
                     "right_gaze_point_y": float(gaze.right_gaze_point_y),
                     "right_gaze_point_z": float(gaze.right_gaze_point_z),
-                    # Screen points
                     "left_point_screen_x": float(gaze.left_point_screen_x),
                     "left_point_screen_y": float(gaze.left_point_screen_y),
                     "right_point_screen_x": float(gaze.right_point_screen_x),
                     "right_point_screen_y": float(gaze.right_point_screen_y),
-                    # Validity & pupil
                     "left_validity": int(gaze.left_validity),
                     "right_validity": int(gaze.right_validity),
                     "left_pupil_diameter": float(gaze.left_pupil_diameter),
@@ -367,7 +308,6 @@ class WorkloadInferenceEngine:
                     "right_openness": float(gaze.right_openness),
                 }
             )
-
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
@@ -377,41 +317,34 @@ class WorkloadInferenceEngine:
     def _preprocess_online(
         self, eye_df: pd.DataFrame
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Online preprocessing pipeline for pupil data."""
         empty = pd.DataFrame()
 
         eye_df, _best_eye = select_best_eye(eye_df.copy(), threshold=0.05)
 
         gaps_df = detect_gaps_and_blinks(
             eye_df,
-            confidence_threshold=0.95,
+            confidence_threshold=CONFIDENCE_THRESHOLD,
             blink_threshold_range=(100, 300),
             eye_openness_column="openness",
             openness_threshold=0.5,
         )
 
-        eye_df.rename(
-            columns={"pupil_diameter_mm": "pupil_diameter"}, inplace=True
-        )
+        eye_df.rename(columns={"pupil_diameter_mm": "pupil_diameter"}, inplace=True)
 
         total_samples = len(eye_df)
         if total_samples == 0:
             return empty, gaps_df
 
-        # Check low-confidence ratio
         if not gaps_df.empty:
             non_blink = gaps_df[~gaps_df["is_blink"]]
             if not non_blink.empty:
-                lc_count = (
-                    non_blink["stop_id"] - non_blink["start_id"] + 1
-                ).sum()
-                if lc_count / total_samples > 0.30:
+                lc_count = (non_blink["stop_id"] - non_blink["start_id"] + 1).sum()
+                if lc_count / total_samples > MIN_NON_BLINK_GAP_RATIO_FOR_VALIDITY:
                     return empty, gaps_df
 
         eye_df = eye_df[eye_df["confidence"] >= CONFIDENCE_THRESHOLD]
 
-        # Outlier rejection via running pupil dilation speed stats
-        if "pupil_diameter" in eye_df.columns and len(eye_df) > 10:
+        if "pupil_diameter" in eye_df.columns:
             ts = eye_df["timestamp_sec"].values
             pd_vals = eye_df["pupil_diameter"].values
             dt = np.diff(ts)
@@ -421,41 +354,89 @@ class WorkloadInferenceEngine:
             speeds[0] = speed_fwd[0] if len(speed_fwd) > 0 else 0.0
             speeds[-1] = speed_fwd[-1] if len(speed_fwd) > 0 else 0.0
             speeds[1:-1] = np.maximum(speed_fwd[:-1], speed_fwd[1:])
-
             self._pupil_stats.update_from_speeds(speeds)
             outlier_mask = self._pupil_stats.outlier_mask(speeds)
             eye_df = eye_df[~outlier_mask]
 
-        # Vectorized gap-margin removal
-        margins = 50 / 1000
-        sig_gaps = gaps_df[gaps_df["duration_ms"] >= DURATION_THRESHOLD_SEC * 1000]
-        if not sig_gaps.empty:
-            ts_arr = eye_df["timestamp_sec"].values
-            keep = np.ones(len(ts_arr), dtype=bool)
-            for start_t, stop_t in zip(
-                sig_gaps["start_timestamp"].values,
-                sig_gaps["stop_timestamp"].values,
-            ):
-                keep &= (ts_arr < start_t - margins) | (
-                    ts_arr > stop_t + margins
-                )
-            eye_df = eye_df[keep]
+        # Remove blinks with a margin on either side to avoid edge artefacts
+        margins = BLINK_SAMPLE_MARGIN_MS / 1000.0
+        for _, row in gaps_df[
+            gaps_df["duration_ms"] >= BLINK_DURATION_MIN_THRESHOLD_MS
+        ].iterrows():
+            idx_to_drop = eye_df[
+                (eye_df["timestamp_sec"] >= row["start_timestamp"] - margins)
+                & (eye_df["timestamp_sec"] <= row["stop_timestamp"] + margins)
+            ].index
+            eye_df.drop(idx_to_drop, inplace=True)
 
-        if len(eye_df) < 50:
+        if len(eye_df) < MIN_SAMPLES_FOR_INTERPOLATION:
             return empty, gaps_df
 
         pupil_df = interpolate_pupil_data(
             eye_df,
             gaps_df,
             column="pupil_diameter",
-            max_gap=INTERPOLATION_THRESHOLD_SEC,
+            max_gap_ms=MAX_GAP_THRESHOLD_INTERPOLATION_MS,
         )
-
         return pupil_df, gaps_df
 
     # ------------------------------------------------------------------
-    # Feature extraction
+    # Feature extraction helpers (used by feature-based subclasses)
     # ------------------------------------------------------------------
+
+    def _run_feature_pipeline(
+        self,
+        pupil_df: pd.DataFrame,
+        gaps_df: pd.DataFrame,
+        duration: float,
+    ) -> np.ndarray | None:
+        """Extract scalar engineered features and return a normalised vector.
+
+        Any NaN or inf value is imputed from the last valid window's vector.
+        On the very first window, bad values fall back to 0.0.
+        Returns ``None`` only when no features could be extracted at all.
+        """
+        features = self._extract_blink_features(gaps_df, duration)
+        self._extract_pupil_realtime_features(pupil_df, features)
+
+        if not features:
+            logger.debug("Skipping inference: no features extracted")
+            return None
+
+        if self._feature_columns is None:
+            self._resolve_feature_columns(features)
+
+        feature_vector = np.array(
+            [features.get(col, np.nan) for col in self._feature_columns],
+            dtype=np.float64,
+        )
+
+        # Treat inf as NaN so both are handled uniformly
+        feature_vector = np.where(np.isinf(feature_vector), np.nan, feature_vector)
+
+        bad_mask = np.isnan(feature_vector)
+        if bad_mask.any():
+            if self._last_feature_vector is not None:
+                feature_vector = np.where(
+                    bad_mask, self._last_feature_vector, feature_vector
+                )
+                logger.debug(
+                    "Imputed %d bad features from last valid window", bad_mask.sum()
+                )
+            else:
+                feature_vector = np.where(bad_mask, 0.0, feature_vector)
+                logger.debug(
+                    "Imputed %d bad features with 0.0 (no prior window)", bad_mask.sum()
+                )
+
+        # Save raw (pre-normalisation) vector for future imputation
+        self._last_feature_vector = feature_vector.copy()
+
+        self._normalizer.update(feature_vector)
+        if self._normalizer.n >= 3:
+            feature_vector = self._normalizer.normalize(feature_vector)
+
+        return feature_vector
 
     def _extract_blink_features(
         self, gaps_df: pd.DataFrame, duration_sec: float
@@ -490,15 +471,12 @@ class WorkloadInferenceEngine:
         lhipa_val = self._lhipa.current_lhipa()
         ripa2_val = self._ripa2.current_ripa2_smooth()
 
-        # Only set feature if the extractor returned a valid value
         if lhipa_val is not None:
             features["pupil_lhipa"] = lhipa_val
         if ripa2_val is not None:
             features["pupil_ripa2"] = ripa2_val
 
-        wv_coeffs = self._wavelet.get_last_smoothed_coefficients(
-            len(pupil_values)
-        )
+        wv_coeffs = self._wavelet.get_last_smoothed_coefficients(len(pupil_values))
         for i, coeff in enumerate(wv_coeffs):
             if coeff is not None:
                 features[f"pupil_wv_coeff_{i + 1}"] = coeff
@@ -529,23 +507,17 @@ class WorkloadInferenceEngine:
             return
 
         raw_class, proba, _ = self._prediction_history[-1]
-
-        # Don't feed unknown predictions into the filter
         if raw_class == self.UNKNOWN_CLASS:
             return
 
         with self._inference_lock:
-            self._current_workload, self._current_probabilities = (
-                self._filter.update(raw_class, proba)
+            self._current_workload, self._current_probabilities = self._filter.update(
+                raw_class, proba
             )
 
         for listener in self._listeners:
             try:
-                listener(
-                    raw_class,
-                    self._current_workload,
-                    self._current_probabilities,
-                )
+                listener(raw_class, self._current_workload, self._current_probabilities)
             except Exception:
                 logger.exception("Listener callback failed")
 
@@ -580,3 +552,184 @@ class WorkloadInferenceEngine:
     @property
     def settings(self) -> InferenceSettings:
         return self._settings
+
+    def reset_pupil_buffers(self) -> None:
+        """Flush per-session buffers between tasks.
+
+        Clears the raw gaze buffer, pupil feature extractors, and the Schmitt
+        filter warmup state.  The WelfordNormalizer and OnlinePupilStats are
+        left intact — they carry subject-level statistics that should stay warm
+        across tasks.
+        """
+        self._ripa2.flush()
+        self._lhipa.flush()
+        self._wavelet.flush()
+        self._raw_buffer.clear()
+        self._samples_since_last_inference = 0
+        self._last_feature_vector = None
+        if hasattr(self, "_last_raw_sequence"):
+            self._last_raw_sequence = None
+        self._filter._n_updates = 0
+        self._filter._stable_class = -1
+        self._filter._history.clear()
+        logger.debug("Pupil feature buffers and Schmitt filter reset for new task")
+
+
+# ---------------------------------------------------------------------------
+# Concrete subclasses
+# ---------------------------------------------------------------------------
+
+
+class TabNetInferenceEngine(WorkloadInferenceEngine):
+    """Inference engine backed by a PyTorch-TabNet model (``.zip``)."""
+
+    def _load_model(self, model_path: Path) -> None:
+        try:
+            from pytorch_tabnet.tab_model import TabNetClassifier
+        except ImportError:
+            logger.error("pytorch_tabnet not installed. Cannot load TabNet model.")
+            raise
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Device used",
+                category=UserWarning,
+                module="pytorch_tabnet",
+            )
+            self._model = TabNetClassifier(device_name="cpu")
+        self._model.load_model(model_path)
+        self._model_type = "tabnet"
+        logger.info("Loaded TabNet model from %s", model_path)
+
+    def _extract_features_and_predict(
+        self,
+        pupil_df: pd.DataFrame,
+        gaps_df: pd.DataFrame,
+        duration: float,
+    ) -> tuple[int, np.ndarray] | None:
+        feature_vector = self._run_feature_pipeline(pupil_df, gaps_df, duration)
+        if feature_vector is None:
+            return None
+        X = feature_vector.reshape(1, -1).astype(np.float32)
+        proba = self._model.predict_proba(X)[0]
+        return int(np.argmax(proba)), proba
+
+
+class SklearnInferenceEngine(WorkloadInferenceEngine):
+    """Inference engine backed by a scikit-learn compatible model.
+
+    Supports ``.pkl`` and ``.joblib`` serialised estimators.
+    """
+
+    def _load_model(self, model_path: Path) -> None:
+        import joblib
+
+        self._model = joblib.load(model_path)
+        self._model_type = "sklearn"
+        logger.info("Loaded sklearn model from %s", model_path)
+
+    def _extract_features_and_predict(
+        self,
+        pupil_df: pd.DataFrame,
+        gaps_df: pd.DataFrame,
+        duration: float,
+    ) -> tuple[int, np.ndarray] | None:
+        feature_vector = self._run_feature_pipeline(pupil_df, gaps_df, duration)
+        if feature_vector is None:
+            return None
+        X = feature_vector.reshape(1, -1).astype(np.float32)
+        proba = self._model.predict_proba(X)[0]
+        return int(np.argmax(proba)), proba
+
+
+class TCNInferenceEngine(WorkloadInferenceEngine):
+    """Inference engine backed by a Temporal Convolutional Network (``.pt``/``.pth``).
+
+    The model receives a raw time-series tensor of shape
+    ``(1, n_channels, seq_len)`` where *n_channels* corresponds to
+    ``settings.raw_feature_columns`` (default: ``["pupil_diameter"]``) and
+    *seq_len* is resampled to ``settings.window_size_samples``.
+
+    Both TorchScript (``.pt`` saved with ``torch.jit.save``) and standard
+    ``.pth`` checkpoints (``torch.save``) are supported; TorchScript is
+    attempted first.
+    """
+
+    _DEFAULT_RAW_FEATURES: list[str] = ["pupil_diameter"]
+
+    def _load_model(self, model_path: Path) -> None:
+        try:
+            import torch
+        except ImportError:
+            logger.error("torch not installed. Cannot load TCN model.")
+            raise
+
+        try:
+            self._model = torch.jit.load(str(model_path), map_location="cpu")
+            logger.info("Loaded TorchScript TCN model from %s", model_path)
+        except Exception:
+            self._model = torch.load(
+                str(model_path), map_location="cpu", weights_only=False
+            )
+            if hasattr(self._model, "eval"):
+                self._model.eval()
+            logger.info("Loaded PyTorch TCN model from %s", model_path)
+
+        self._model_type = "tcn"
+
+    def _extract_features_and_predict(
+        self,
+        pupil_df: pd.DataFrame,
+        gaps_df: pd.DataFrame,
+        duration: float,
+    ) -> tuple[int, np.ndarray] | None:
+        import torch
+
+        raw_cols = self._settings.raw_feature_columns or self._DEFAULT_RAW_FEATURES
+        target_len = self._window_size_samples
+        n_channels = len(raw_cols)
+
+        # Lazily initialise the last-sequence cache
+        if not hasattr(self, "_last_raw_sequence"):
+            self._last_raw_sequence: np.ndarray | None = None
+
+        # Build full (current_len, n_channels) array, channel by channel.
+        # Columns present in pupil_df are used directly; missing ones (e.g. gaze
+        # columns that don't survive pupil preprocessing) are filled from the
+        # last known sequence for that channel, or zeros on the first window.
+        n_rows = len(pupil_df)
+        seq = np.zeros((n_rows, n_channels), dtype=np.float32)
+        for i, col in enumerate(raw_cols):
+            if col in pupil_df.columns:
+                seq[:, i] = pupil_df[col].values.astype(np.float32)
+            elif self._last_raw_sequence is not None:
+                # Repeat the last known channel at its resampled length
+                seq[:, i] = np.interp(
+                    np.linspace(0, target_len - 1, n_rows),
+                    np.arange(target_len),
+                    self._last_raw_sequence[:, i],
+                ).astype(np.float32)
+                logger.debug("TCN: imputed missing column '%s' from last window", col)
+            # else: column stays zero (first window with no history)
+
+        # Resample to the fixed window length the model was trained on
+        if n_rows != target_len:
+            src = np.arange(n_rows)
+            dst = np.linspace(0, n_rows - 1, target_len)
+            seq = np.stack(
+                [np.interp(dst, src, seq[:, i]) for i in range(n_channels)],
+                axis=1,
+            ).astype(np.float32)
+
+        # Save for future imputation of missing channels
+        self._last_raw_sequence = seq.copy()
+
+        # (1, n_channels, seq_len) — standard conv1d layout
+        X = torch.from_numpy(seq.T).unsqueeze(0)
+
+        with torch.no_grad():
+            logits = self._model(X)
+            proba = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+
+        return int(np.argmax(proba)), proba
