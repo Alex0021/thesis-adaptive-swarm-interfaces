@@ -105,6 +105,7 @@ class NBackData:
 class DroneData:
     timestamp: np.int64
     id: np.int8
+    alive: np.uint8
     position_x: np.float32
     position_y: np.float32
     position_z: np.float32
@@ -129,7 +130,7 @@ class DroneData:
 
     @classmethod
     def size(cls) -> int:
-        return 8 + 1 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4
+        return 8 + 1 + 1 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4 + 3 * 4
 
     @classmethod
     def from_buffer(cls, buffer: bytes) -> DroneData:
@@ -140,21 +141,22 @@ class DroneData:
         return DroneData(
             timestamp=np.frombuffer(buffer[0:8], dtype=np.int64)[0],
             id=np.frombuffer(buffer[8:9], dtype=np.int8)[0],
-            position_x=np.frombuffer(buffer[9:13], dtype=np.float32)[0],
-            position_y=np.frombuffer(buffer[13:17], dtype=np.float32)[0],
-            position_z=np.frombuffer(buffer[17:21], dtype=np.float32)[0],
-            orientation_x=np.frombuffer(buffer[21:25], dtype=np.float32)[0],
-            orientation_y=np.frombuffer(buffer[25:29], dtype=np.float32)[0],
-            orientation_z=np.frombuffer(buffer[29:33], dtype=np.float32)[0],
-            velocity_x=np.frombuffer(buffer[33:37], dtype=np.float32)[0],
-            velocity_y=np.frombuffer(buffer[37:41], dtype=np.float32)[0],
-            velocity_z=np.frombuffer(buffer[41:45], dtype=np.float32)[0],
-            angular_velocity_x=np.frombuffer(buffer[45:49], dtype=np.float32)[0],
-            angular_velocity_y=np.frombuffer(buffer[49:53], dtype=np.float32)[0],
-            angular_velocity_z=np.frombuffer(buffer[53:57], dtype=np.float32)[0],
-            acceleration_x=np.frombuffer(buffer[57:61], dtype=np.float32)[0],
-            acceleration_y=np.frombuffer(buffer[61:65], dtype=np.float32)[0],
-            acceleration_z=np.frombuffer(buffer[65:69], dtype=np.float32)[0],
+            alive=np.frombuffer(buffer[9:10], dtype=np.uint8)[0],
+            position_x=np.frombuffer(buffer[10:14], dtype=np.float32)[0],
+            position_y=np.frombuffer(buffer[14:18], dtype=np.float32)[0],
+            position_z=np.frombuffer(buffer[18:22], dtype=np.float32)[0],
+            orientation_x=np.frombuffer(buffer[22:26], dtype=np.float32)[0],
+            orientation_y=np.frombuffer(buffer[26:30], dtype=np.float32)[0],
+            orientation_z=np.frombuffer(buffer[30:34], dtype=np.float32)[0],
+            velocity_x=np.frombuffer(buffer[34:38], dtype=np.float32)[0],
+            velocity_y=np.frombuffer(buffer[38:42], dtype=np.float32)[0],
+            velocity_z=np.frombuffer(buffer[42:46], dtype=np.float32)[0],
+            angular_velocity_x=np.frombuffer(buffer[46:50], dtype=np.float32)[0],
+            angular_velocity_y=np.frombuffer(buffer[50:54], dtype=np.float32)[0],
+            angular_velocity_z=np.frombuffer(buffer[54:58], dtype=np.float32)[0],
+            acceleration_x=np.frombuffer(buffer[58:62], dtype=np.float32)[0],
+            acceleration_y=np.frombuffer(buffer[62:66], dtype=np.float32)[0],
+            acceleration_z=np.frombuffer(buffer[66:70], dtype=np.float32)[0],
         )
 
     @classmethod
@@ -163,6 +165,7 @@ class DroneData:
             return DroneData(
                 timestamp=np.int64(data["timestamp"]),
                 id=np.int8(data["id"]),
+                alive=np.uint8(data["alive"]),
                 position_x=np.float32(data["position"][0]),
                 position_y=np.float32(data["position"][1]),
                 position_z=np.float32(data["position"][2]),
@@ -185,7 +188,60 @@ class DroneData:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, DroneData):
             return NotImplemented
-        return self.timestamp == other.timestamp and self.id == other.id
+        return (
+            self.timestamp == other.timestamp
+            and self.id == other.id
+            and self.alive == other.alive
+        )
+
+
+@dataclass
+class UserInputData:
+    timestamp: np.int64
+    altitude_rate: np.float32
+    yaw_rate: np.float32
+    pitch_rate: np.float32
+    roll_rate: np.float32
+    swarm_spread: np.float32
+
+    def get_conversion_str(self) -> str:
+        return "<q5f"
+
+    def __len__(self) -> int:
+        return self.size()
+
+    @classmethod
+    def size(cls) -> int:
+        return 8 + 5 * 4
+
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> UserInputData:
+        if len(buffer) < cls.size():
+            raise ValueError(
+                f"Buffer size {len(buffer)} is smaller than expected size {cls.size()}."
+            )
+        return UserInputData(
+            timestamp=np.frombuffer(buffer[0:8], dtype=np.int64)[0],
+            altitude_rate=np.frombuffer(buffer[8:12], dtype=np.float32)[0],
+            yaw_rate=np.frombuffer(buffer[12:16], dtype=np.float32)[0],
+            pitch_rate=np.frombuffer(buffer[16:20], dtype=np.float32)[0],
+            roll_rate=np.frombuffer(buffer[20:24], dtype=np.float32)[0],
+            swarm_spread=np.frombuffer(buffer[24:28], dtype=np.float32)[0],
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> UserInputData:
+        try:
+            return UserInputData(
+                timestamp=np.int64(data["timestamp"]),
+                altitude_rate=np.float32(data["altitude_rate"]),
+                yaw_rate=np.float32(data["yaw_rate"]),
+                pitch_rate=np.float32(data["pitch_rate"]),
+                roll_rate=np.float32(data["roll_rate"]),
+                swarm_spread=np.float32(data["swarm_spread"]),
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing key in data dictionary: {e}") from e
 
 
 @dataclass
