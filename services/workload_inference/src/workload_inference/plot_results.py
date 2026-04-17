@@ -57,6 +57,7 @@ _SUBJECT_RE = re.compile(r"^[A-Z0-9]{4}$")
 # Mode detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _detect_mode(data_dir: Path) -> str:
     """Return 'trial', 'subject', or 'experiment'."""
     if (data_dir / INFERENCE_FILE_NAME).exists():
@@ -74,7 +75,8 @@ def _find_task_for_cwl(subject_dir: Path, cwl_level: int) -> str | None:
     the requested CWL level.  Returns None if no matching task is found.
     """
     task_dirs = sorted(
-        d for d in subject_dir.iterdir()
+        d
+        for d in subject_dir.iterdir()
         if d.is_dir() and re.match(r"^task_\d+$", d.name)
     )
     if not task_dirs:
@@ -115,6 +117,7 @@ def _find_task_for_cwl(subject_dir: Path, cwl_level: int) -> str | None:
 # Data loading
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def load_inference_data(experiments_dir: Path) -> pd.DataFrame:
     csv_files = sorted(experiments_dir.rglob(INFERENCE_FILE_NAME))
     if not csv_files:
@@ -144,6 +147,7 @@ def _task_trials_only(data: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _state_step_plot(
     ax: plt.Axes, x: np.ndarray, y: np.ndarray, label: str, color: str, **kwargs
@@ -181,7 +185,9 @@ def _bar_label(ax: plt.Axes, bars, fmt: str = "{:.0%}", offset: float = 0.02):
                 bar.get_x() + bar.get_width() / 2,
                 val + offset,
                 fmt.format(val),
-                ha="center", va="bottom", fontsize=8,
+                ha="center",
+                va="bottom",
+                fontsize=8,
             )
 
 
@@ -190,15 +196,19 @@ def _hbar_label(ax: plt.Axes, bars, fmt: str = "{:.0%}", offset: float = 0.01):
         val = bar.get_width()
         if val > 0:
             ax.text(
-                val + offset, bar.get_y() + bar.get_height() / 2,
+                val + offset,
+                bar.get_y() + bar.get_height() / 2,
                 fmt.format(val),
-                ha="left", va="center", fontsize=8,
+                ha="left",
+                va="center",
+                fontsize=8,
             )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Time series plot  (shared by all modes)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def plot_inference_time_series(
     data: pd.DataFrame, ax_states: plt.Axes, ax_rolling: plt.Axes
@@ -229,29 +239,45 @@ def plot_inference_time_series(
 
         first = src == sources[0]
         _state_step_plot(
-            ax_states, t, gt,
+            ax_states,
+            t,
+            gt,
             label="Ground truth" if first else "_",
-            color="#333333", linewidth=1.5, linestyle="--",
+            color="#333333",
+            linewidth=1.5,
+            linestyle="--",
         )
         _state_step_plot(
-            ax_states, t, raw,
+            ax_states,
+            t,
+            raw,
             label="Raw inference" if first else "_",
-            color="#1976D2", linewidth=1.2, alpha=0.85,
+            color="#1976D2",
+            linewidth=1.2,
+            alpha=0.85,
         )
         _state_step_plot(
-            ax_states, t, filt,
+            ax_states,
+            t,
+            filt,
             label="Filtered inference" if first else "_",
-            color="#E91E63", linewidth=1.5,
+            color="#E91E63",
+            linewidth=1.5,
         )
 
         ax_rolling.plot(
-            t, _accuracy_over_time(gt, raw),
-            color="#1976D2", linewidth=1.2, alpha=0.85,
+            t,
+            _accuracy_over_time(gt, raw),
+            color="#1976D2",
+            linewidth=1.2,
+            alpha=0.85,
             label="Raw accuracy" if first else "_",
         )
         ax_rolling.plot(
-            t, _accuracy_over_time(gt, filt),
-            color="#E91E63", linewidth=1.5,
+            t,
+            _accuracy_over_time(gt, filt),
+            color="#E91E63",
+            linewidth=1.5,
             label="Filtered accuracy" if first else "_",
         )
 
@@ -292,6 +318,7 @@ def plot_inference_time_series(
 # Subject-level accuracy summary
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _build_trial_summary(data: pd.DataFrame) -> pd.DataFrame:
     """One row per source with task, trial, CWL level, raw/filtered accuracy."""
     records = []
@@ -302,14 +329,16 @@ def _build_trial_summary(data: pd.DataFrame) -> pd.DataFrame:
         nback_level = int(grp["nback_level"].mode().iloc[0])
         raw_acc = float((grp["nback_level"] == grp["raw_state"]).mean())
         filt_acc = float((grp["nback_level"] == grp["filtered_state"]).mean())
-        records.append({
-            "source": src,
-            "task": task,
-            "trial": trial,
-            "nback_level": nback_level,
-            "raw_acc": raw_acc,
-            "filt_acc": filt_acc,
-        })
+        records.append(
+            {
+                "source": src,
+                "task": task,
+                "trial": trial,
+                "nback_level": nback_level,
+                "raw_acc": raw_acc,
+                "filt_acc": filt_acc,
+            }
+        )
     return pd.DataFrame(records)
 
 
@@ -329,11 +358,21 @@ def plot_subject_accuracy_summary(
     task_filt = [summary[summary["task"] == t]["filt_acc"].mean() for t in tasks]
 
     bars_r = ax_task.bar(
-        x - width / 2, task_raw, width, label="Raw", color="#1976D2", alpha=0.85,
+        x - width / 2,
+        task_raw,
+        width,
+        label="Raw",
+        color="#1976D2",
+        alpha=0.85,
         edgecolor="white",
     )
     bars_f = ax_task.bar(
-        x + width / 2, task_filt, width, label="Filtered", color="#E91E63", alpha=0.85,
+        x + width / 2,
+        task_filt,
+        width,
+        label="Filtered",
+        color="#E91E63",
+        alpha=0.85,
         edgecolor="white",
     )
     _bar_label(ax_task, bars_r)
@@ -345,12 +384,26 @@ def plot_subject_accuracy_summary(
         n = len(t_rows)
         jitter = np.linspace(-0.07, 0.07, n) if n > 1 else [0.0]
         for j, (_, row) in zip(jitter, t_rows.iterrows()):
-            ax_task.scatter(xi - width / 2 + j, row["raw_acc"],
-                            color="#1976D2", s=35, zorder=5, alpha=0.7,
-                            edgecolors="white", linewidths=0.5)
-            ax_task.scatter(xi + width / 2 + j, row["filt_acc"],
-                            color="#E91E63", s=35, zorder=5, alpha=0.7,
-                            edgecolors="white", linewidths=0.5)
+            ax_task.scatter(
+                xi - width / 2 + j,
+                row["raw_acc"],
+                color="#1976D2",
+                s=35,
+                zorder=5,
+                alpha=0.7,
+                edgecolors="white",
+                linewidths=0.5,
+            )
+            ax_task.scatter(
+                xi + width / 2 + j,
+                row["filt_acc"],
+                color="#E91E63",
+                s=35,
+                zorder=5,
+                alpha=0.7,
+                edgecolors="white",
+                linewidths=0.5,
+            )
 
     # x-axis labels include CWL level
     task_xlabels = []
@@ -367,23 +420,36 @@ def plot_subject_accuracy_summary(
     ax_task.set_title("Accuracy per Task")
     ax_task.legend(fontsize=8)
     ax_task.grid(axis="y", linestyle=":", alpha=0.4)
-    ax_task.axhline(chance, color="gray", linewidth=0.8, linestyle="--", alpha=0.6,
-                    label="Chance")
+    ax_task.axhline(
+        chance, color="gray", linewidth=0.8, linestyle="--", alpha=0.6, label="Chance"
+    )
 
     # ── Panel B: per CWL level ───────────────────────────────────────────────
     levels = sorted(summary["nback_level"].unique())
     x2 = np.arange(len(levels))
 
     level_raw = [summary[summary["nback_level"] == l]["raw_acc"].mean() for l in levels]
-    level_filt = [summary[summary["nback_level"] == l]["filt_acc"].mean() for l in levels]
+    level_filt = [
+        summary[summary["nback_level"] == l]["filt_acc"].mean() for l in levels
+    ]
     level_counts = [int((summary["nback_level"] == l).sum()) for l in levels]
 
     bars_r2 = ax_level.bar(
-        x2 - width / 2, level_raw, width, label="Raw", color="#1976D2", alpha=0.85,
+        x2 - width / 2,
+        level_raw,
+        width,
+        label="Raw",
+        color="#1976D2",
+        alpha=0.85,
         edgecolor="white",
     )
     bars_f2 = ax_level.bar(
-        x2 + width / 2, level_filt, width, label="Filtered", color="#E91E63", alpha=0.85,
+        x2 + width / 2,
+        level_filt,
+        width,
+        label="Filtered",
+        color="#E91E63",
+        alpha=0.85,
         edgecolor="white",
     )
     _bar_label(ax_level, bars_r2)
@@ -395,12 +461,26 @@ def plot_subject_accuracy_summary(
         n = len(l_rows)
         jitter = np.linspace(-0.07, 0.07, n) if n > 1 else [0.0]
         for j, (_, row) in zip(jitter, l_rows.iterrows()):
-            ax_level.scatter(xi - width / 2 + j, row["raw_acc"],
-                             color="#1976D2", s=35, zorder=5, alpha=0.7,
-                             edgecolors="white", linewidths=0.5)
-            ax_level.scatter(xi + width / 2 + j, row["filt_acc"],
-                             color="#E91E63", s=35, zorder=5, alpha=0.7,
-                             edgecolors="white", linewidths=0.5)
+            ax_level.scatter(
+                xi - width / 2 + j,
+                row["raw_acc"],
+                color="#1976D2",
+                s=35,
+                zorder=5,
+                alpha=0.7,
+                edgecolors="white",
+                linewidths=0.5,
+            )
+            ax_level.scatter(
+                xi + width / 2 + j,
+                row["filt_acc"],
+                color="#E91E63",
+                s=35,
+                zorder=5,
+                alpha=0.7,
+                edgecolors="white",
+                linewidths=0.5,
+            )
 
     ax_level.set_xticks(x2)
     ax_level.set_xticklabels(
@@ -411,15 +491,17 @@ def plot_subject_accuracy_summary(
     ax_level.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
     ax_level.set_ylabel("Accuracy")
     ax_level.set_title("Accuracy per CWL Level")
-    ax_level.legend(fontsize=8)
     ax_level.grid(axis="y", linestyle=":", alpha=0.4)
-    ax_level.axhline(chance, color="gray", linewidth=0.8, linestyle="--", alpha=0.6,
-                     label="Chance")
+    ax_level.axhline(
+        chance, color="gray", linewidth=0.8, linestyle="--", alpha=0.6, label="Chance"
+    )
+    ax_level.legend(fontsize=8, loc=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Experiment-level accuracy summary (legacy, multiple subjects)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def plot_inference_accuracy_summary(
     data: pd.DataFrame, ax_overall: plt.Axes, ax_per_class: plt.Axes
@@ -432,8 +514,11 @@ def plot_inference_accuracy_summary(
     acc_filt = (gt == filt).mean()
 
     bars = ax_overall.bar(
-        ["Raw", "Filtered"], [acc_raw, acc_filt],
-        color=["#1976D2", "#E91E63"], width=0.5, edgecolor="white",
+        ["Raw", "Filtered"],
+        [acc_raw, acc_filt],
+        color=["#1976D2", "#E91E63"],
+        width=0.5,
+        edgecolor="white",
     )
     ax_overall.set_ylim(0, 1.1)
     ax_overall.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
@@ -442,8 +527,13 @@ def plot_inference_accuracy_summary(
     ax_overall.grid(axis="y", linestyle=":", alpha=0.4)
     for bar, val in zip(bars, [acc_raw, acc_filt]):
         ax_overall.text(
-            bar.get_x() + bar.get_width() / 2, val + 0.02,
-            f"{val:.1%}", ha="center", va="bottom", fontsize=10, fontweight="bold",
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.1%}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
         )
 
     levels = [0, 1, 2]
@@ -459,12 +549,20 @@ def plot_inference_accuracy_summary(
         filt_per_class.append((filt[mask] == lvl).mean() if n > 0 else 0.0)
 
     bars_raw = ax_per_class.bar(
-        x - width / 2, raw_per_class, width, label="Raw",
-        color="#1976D2", edgecolor="white",
+        x - width / 2,
+        raw_per_class,
+        width,
+        label="Raw",
+        color="#1976D2",
+        edgecolor="white",
     )
     bars_filt = ax_per_class.bar(
-        x + width / 2, filt_per_class, width, label="Filtered",
-        color="#E91E63", edgecolor="white",
+        x + width / 2,
+        filt_per_class,
+        width,
+        label="Filtered",
+        color="#E91E63",
+        edgecolor="white",
     )
     ax_per_class.set_xticks(x)
     ax_per_class.set_xticklabels(
@@ -474,7 +572,7 @@ def plot_inference_accuracy_summary(
     ax_per_class.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
     ax_per_class.set_ylabel("Accuracy")
     ax_per_class.set_title("Per-Class Accuracy")
-    ax_per_class.legend(fontsize=8)
+    ax_per_class.legend(fontsize=8, loc=1)
     ax_per_class.grid(axis="y", linestyle=":", alpha=0.4)
     for bars_group in (bars_raw, bars_filt):
         _bar_label(ax_per_class, bars_group)
@@ -483,6 +581,7 @@ def plot_inference_accuracy_summary(
 # ─────────────────────────────────────────────────────────────────────────────
 # Trajectory CWL helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _load_spline() -> pd.DataFrame | None:
     """Load spline_trajectory.csv (x, z columns used for the track outline)."""
@@ -518,9 +617,7 @@ def _load_trial_inference(trial_dir: Path) -> pd.DataFrame | None:
     return df.sort_values("timestamp") if not df.empty else None
 
 
-def _join_cwl_to_drone(
-    drone_df: pd.DataFrame, inf_df: pd.DataFrame
-) -> pd.DataFrame:
+def _join_cwl_to_drone(drone_df: pd.DataFrame, inf_df: pd.DataFrame) -> pd.DataFrame:
     """Attach filtered_state and nback_level to each drone row via merge_asof."""
     drone_sorted = drone_df.sort_values("timestamp")
     inf_sorted = inf_df[["timestamp", "filtered_state", "nback_level"]].sort_values(
@@ -570,6 +667,7 @@ def _project_to_arc(
 # Per-CWL-level checkbox widget
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _add_cwl_checkboxes(
     ax_traj: plt.Axes,
     per_level_artists: dict[int, list],
@@ -612,9 +710,13 @@ def _add_cwl_checkboxes(
 # Subject + task trajectory plot
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _plot_subject_task_trajectory(
-    data_dir: Path, cwl_level: int, spline_df: pd.DataFrame,
-    ax_traj: plt.Axes, ax_acc: plt.Axes,
+    data_dir: Path,
+    cwl_level: int,
+    spline_df: pd.DataFrame,
+    ax_traj: plt.Axes,
+    ax_acc: plt.Axes,
 ):
     """Left: trajectory colored by CWL per trial.  Right: per-trial accuracy bars."""
     task = _find_task_for_cwl(data_dir, cwl_level)
@@ -660,17 +762,27 @@ def _plot_subject_task_trajectory(
             label = STATE_LABELS[level] if level not in drawn_levels else "_"
             drawn_levels.add(level)
             sc = ax_traj.scatter(
-                sub["position_z"], sub["position_x"],
-                c=color, s=6, alpha=0.6, label=label, zorder=2,
+                sub["position_z"],
+                sub["position_x"],
+                c=color,
+                s=6,
+                alpha=0.6,
+                label=label,
+                zorder=2,
             )
             per_level_artists[level].append(sc)
 
         # Mark trial start
         first = merged.iloc[0]
         ax_traj.annotate(
-            trial_dir.name, (first["position_z"], first["position_x"]),
-            fontsize=6, color="#555", ha="center", va="bottom",
-            textcoords="offset points", xytext=(0, 4),
+            trial_dir.name,
+            (first["position_z"], first["position_x"]),
+            fontsize=6,
+            color="#555",
+            ha="center",
+            va="bottom",
+            textcoords="offset points",
+            xytext=(0, 4),
         )
 
         # Accuracy for right panel
@@ -698,12 +810,22 @@ def _plot_subject_task_trajectory(
     y = np.arange(len(trial_names))
     height = 0.35
     bars_r = ax_acc.barh(
-        y - height / 2, raw_accs, height, label="Raw",
-        color="#1976D2", alpha=0.85, edgecolor="white",
+        y - height / 2,
+        raw_accs,
+        height,
+        label="Raw",
+        color="#1976D2",
+        alpha=0.85,
+        edgecolor="white",
     )
     bars_f = ax_acc.barh(
-        y + height / 2, filt_accs, height, label="Filtered",
-        color="#E91E63", alpha=0.85, edgecolor="white",
+        y + height / 2,
+        filt_accs,
+        height,
+        label="Filtered",
+        color="#E91E63",
+        alpha=0.85,
+        edgecolor="white",
     )
     _hbar_label(ax_acc, bars_r)
     _hbar_label(ax_acc, bars_f)
@@ -724,17 +846,20 @@ def _plot_subject_task_trajectory(
 # Experiment + task aggregate trajectory plot
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _plot_aggregate_task_trajectory(
-    data_dir: Path, cwl_level: int, spline_df: pd.DataFrame,
-    ax_traj: plt.Axes, ax_acc: plt.Axes,
+    data_dir: Path,
+    cwl_level: int,
+    spline_df: pd.DataFrame,
+    ax_traj: plt.Axes,
+    ax_acc: plt.Axes,
 ):
     """Left: aggregate trajectory (mean ± std).  Right: per-subject accuracy."""
     cwl_label = STATE_LABELS.get(cwl_level, str(cwl_level))
 
     # Discover all subjects (task order may differ per subject)
     subject_dirs = sorted(
-        d for d in data_dir.iterdir()
-        if d.is_dir() and _SUBJECT_RE.match(d.name)
+        d for d in data_dir.iterdir() if d.is_dir() and _SUBJECT_RE.match(d.name)
     )
     if not subject_dirs:
         print(f"  No subject folders found under {data_dir}")
@@ -754,14 +879,11 @@ def _plot_aggregate_task_trajectory(
         # Resolve which task holds this CWL level for this subject
         task = _find_task_for_cwl(subj_dir, cwl_level)
         if task is None:
-            print(
-                f"  {subj_dir.name}: no task found for CWL={cwl_label}, skipping."
-            )
+            print(f"  {subj_dir.name}: no task found for CWL={cwl_label}, skipping.")
             continue
         task_dir = subj_dir / task
         trial_dirs = sorted(
-            d for d in task_dir.iterdir()
-            if d.is_dir() and d.name.startswith("trial_")
+            d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("trial_")
         )
         if not trial_dirs:
             continue
@@ -796,8 +918,13 @@ def _plot_aggregate_task_trajectory(
             label = STATE_LABELS[level] if level not in drawn_levels else "_"
             drawn_levels.add(level)
             sc = ax_traj.scatter(
-                sub["position_z"], sub["position_x"],
-                c=color, s=4, alpha=0.15, label=label, zorder=1,
+                sub["position_z"],
+                sub["position_x"],
+                c=color,
+                s=4,
+                alpha=0.15,
+                label=label,
+                zorder=1,
             )
             per_level_artists[level].append(sc)
 
@@ -805,7 +932,8 @@ def _plot_aggregate_task_trajectory(
         arcs = _project_to_arc(
             subj_all["position_x"].values,
             subj_all["position_z"].values,
-            spline_df, arc_param,
+            spline_df,
+            arc_param,
         )
         subj_all = subj_all.copy()
         subj_all["arc"] = arcs
@@ -825,23 +953,32 @@ def _plot_aggregate_task_trajectory(
         combined = pd.concat(all_arc_cwl, ignore_index=True)
         n_bins = 200
         combined["arc_bin"] = pd.cut(combined["arc"], bins=n_bins, labels=False)
-        binned = combined.groupby("arc_bin").agg(
-            x_mean=("position_x", "mean"),
-            z_mean=("position_z", "mean"),
-            x_std=("position_x", "std"),
-            z_std=("position_z", "std"),
-            cwl_mode=(
-                "filtered_state",
-                lambda s: int(s.mode().iloc[0]) if len(s) > 0 else 0,
-            ),
-        ).dropna()
+        binned = (
+            combined.groupby("arc_bin")
+            .agg(
+                x_mean=("position_x", "mean"),
+                z_mean=("position_z", "mean"),
+                x_std=("position_x", "std"),
+                z_std=("position_z", "std"),
+                cwl_mode=(
+                    "filtered_state",
+                    lambda s: int(s.mode().iloc[0]) if len(s) > 0 else 0,
+                ),
+            )
+            .dropna()
+        )
 
         # Draw mean line, colored per-bin
         for _, row in binned.iterrows():
             color = STATE_COLORS.get(int(row["cwl_mode"]), "#999")
             sc = ax_traj.scatter(
-                row["z_mean"], row["x_mean"],
-                c=color, s=30, zorder=3, edgecolors="white", linewidths=0.3,
+                row["z_mean"],
+                row["x_mean"],
+                c=color,
+                s=30,
+                zorder=3,
+                edgecolors="white",
+                linewidths=0.3,
             )
             mean_artists.append(sc)
 
@@ -861,12 +998,22 @@ def _plot_aggregate_task_trajectory(
     y = np.arange(len(subject_names))
     height = 0.35
     bars_r = ax_acc.barh(
-        y - height / 2, subject_raw_accs, height, label="Raw",
-        color="#1976D2", alpha=0.85, edgecolor="white",
+        y - height / 2,
+        subject_raw_accs,
+        height,
+        label="Raw",
+        color="#1976D2",
+        alpha=0.85,
+        edgecolor="white",
     )
     bars_f = ax_acc.barh(
-        y + height / 2, subject_filt_accs, height, label="Filtered",
-        color="#E91E63", alpha=0.85, edgecolor="white",
+        y + height / 2,
+        subject_filt_accs,
+        height,
+        label="Filtered",
+        color="#E91E63",
+        alpha=0.85,
+        edgecolor="white",
     )
     _hbar_label(ax_acc, bars_r)
     _hbar_label(ax_acc, bars_f)
@@ -877,7 +1024,7 @@ def _plot_aggregate_task_trajectory(
     ax_acc.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
     ax_acc.set_xlabel("Accuracy")
     ax_acc.set_title(f"Per-Subject Accuracy — CWL: {cwl_label}")
-    ax_acc.legend(fontsize=8, loc="lower right")
+    ax_acc.legend(fontsize=8, loc="upper right")
     ax_acc.grid(axis="x", linestyle=":", alpha=0.4)
     ax_acc.axvline(1 / 3, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
     ax_acc.invert_yaxis()
@@ -888,11 +1035,15 @@ def _plot_aggregate_task_trajectory(
     mean_raw = np.mean(subject_raw_accs)
     std_raw = np.std(subject_raw_accs)
     ax_acc.text(
-        0.98, 0.02,
+        0.98,
+        0.02,
         f"Filtered: {mean_filt:.1%} ± {std_filt:.1%}\n"
         f"Raw: {mean_raw:.1%} ± {std_raw:.1%}",
-        transform=ax_acc.transAxes, ha="right", va="bottom",
-        fontsize=8, fontweight="bold",
+        transform=ax_acc.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        fontweight="bold",
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
     )
 
@@ -900,6 +1051,7 @@ def _plot_aggregate_task_trajectory(
 # ─────────────────────────────────────────────────────────────────────────────
 # Spline accuracy ribbon plot
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _collect_merged_frames(data_dir: Path, cwl_level: int) -> list[pd.DataFrame]:
     """Return all drone+inference merged DataFrames for *cwl_level*.
@@ -910,10 +1062,10 @@ def _collect_merged_frames(data_dir: Path, cwl_level: int) -> list[pd.DataFrame]
     """
     mode = _detect_mode(data_dir)
     subject_dirs = (
-        [data_dir] if mode == "subject"
+        [data_dir]
+        if mode == "subject"
         else sorted(
-            d for d in data_dir.iterdir()
-            if d.is_dir() and _SUBJECT_RE.match(d.name)
+            d for d in data_dir.iterdir() if d.is_dir() and _SUBJECT_RE.match(d.name)
         )
     )
     frames: list[pd.DataFrame] = []
@@ -923,8 +1075,7 @@ def _collect_merged_frames(data_dir: Path, cwl_level: int) -> list[pd.DataFrame]
             continue
         task_dir = subj_dir / task
         trial_dirs = sorted(
-            d for d in task_dir.iterdir()
-            if d.is_dir() and d.name.startswith("trial_")
+            d for d in task_dir.iterdir() if d.is_dir() and d.name.startswith("trial_")
         )
         for trial_dir in trial_dirs:
             drone_df = _load_trial_drone(trial_dir)
@@ -964,10 +1115,10 @@ def _plot_spline_accuracy_ribbon(
     # Spline tangent + normal in plot space (z on x-axis, x on y-axis)
     tgz = np.gradient(sz)
     tgx = np.gradient(sx)
-    mag = np.sqrt(tgz ** 2 + tgx ** 2) + 1e-9
+    mag = np.sqrt(tgz**2 + tgx**2) + 1e-9
     tgz /= mag
     tgx /= mag
-    nz = tgx   # 90° CW normal → points outside the track for a CW loop
+    nz = tgx  # 90° CW normal → points outside the track for a CW loop
     nx = -tgz
 
     # Project inference rows onto arc and bin
@@ -975,7 +1126,8 @@ def _plot_spline_accuracy_ribbon(
     arcs = _project_to_arc(
         combined["position_x"].values,
         combined["position_z"].values,
-        spline_df, arc_param,
+        spline_df,
+        arc_param,
     )
     combined = combined.copy()
     combined["arc"] = arcs
@@ -1027,26 +1179,35 @@ def _plot_spline_accuracy_ribbon(
                 offset += w
                 continue
             verts = _stacked_quad(i, i + 1, offset, offset + w)
-            ax.add_patch(MplPolygon(
-                verts, closed=True,
-                facecolor=STATE_COLORS[level], alpha=0.55,
-                linewidth=0, zorder=2,
-            ))
+            ax.add_patch(
+                MplPolygon(
+                    verts,
+                    closed=True,
+                    facecolor=STATE_COLORS[level],
+                    alpha=0.55,
+                    linewidth=0,
+                    zorder=2,
+                )
+            )
             offset += w
 
     # ── Neutral gray centerline ───────────────────────────────────────────────
-    segments = [
-        [(sz[i], sx[i]), (sz[i + 1], sx[i + 1])]
-        for i in range(len(sz) - 1)
-    ]
+    segments = [[(sz[i], sx[i]), (sz[i + 1], sx[i + 1])] for i in range(len(sz) - 1)]
     lc = LineCollection(segments, colors="#555555", linewidths=1.5, zorder=3)
     ax.add_collection(lc)
 
     # ── Legend ────────────────────────────────────────────────────────────────
     cwl_label = STATE_LABELS.get(cwl_level, str(cwl_level))
     for level, color in STATE_COLORS.items():
-        ax.scatter([], [], c=color, s=80, marker="s", alpha=0.55,
-                   label=f"{STATE_LABELS[level]} predicted")
+        ax.scatter(
+            [],
+            [],
+            c=color,
+            s=80,
+            marker="s",
+            alpha=0.55,
+            label=f"{STATE_LABELS[level]} predicted",
+        )
 
     ax.set_title(
         f"Prediction Ribbon — CWL: {cwl_label}\n"
@@ -1058,6 +1219,7 @@ def _plot_spline_accuracy_ribbon(
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry points per mode
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _save_or_show(figs: list[tuple[plt.Figure, Path]], show: bool):
     for fig, path in figs:
@@ -1071,7 +1233,10 @@ def _save_or_show(figs: list[tuple[plt.Figure, Path]], show: bool):
 
 def _make_time_series_figure(data: pd.DataFrame, title: str) -> plt.Figure:
     fig, (ax_states, ax_rolling) = plt.subplots(
-        2, 1, figsize=(14, 7), sharex=True,
+        2,
+        1,
+        figsize=(14, 7),
+        sharex=True,
         gridspec_kw={"height_ratios": [2, 1], "hspace": 0.05},
     )
     fig.suptitle(title, fontsize=13, fontweight="bold")
@@ -1081,7 +1246,10 @@ def _make_time_series_figure(data: pd.DataFrame, title: str) -> plt.Figure:
 
 
 def run_inference(
-    show: bool, output_dir: Path, data_dir: Path, cwl: int | None = None,
+    show: bool,
+    output_dir: Path,
+    data_dir: Path,
+    cwl: int | None = None,
 ):
     mode = _detect_mode(data_dir)
     print(f"Loading inference data from: {data_dir}  [{mode} mode]")
@@ -1100,12 +1268,15 @@ def run_inference(
 
         if mode == "subject":
             fig, (ax_traj, ax_acc) = plt.subplots(
-                1, 2, figsize=(16, 7),
+                1,
+                2,
+                figsize=(16, 7),
                 gridspec_kw={"width_ratios": [2, 1], "wspace": 0.25},
             )
             fig.suptitle(
                 f"CWL Trajectory — {subject} — {STATE_LABELS.get(cwl, cwl)}",
-                fontsize=13, fontweight="bold",
+                fontsize=13,
+                fontweight="bold",
             )
             _plot_subject_task_trajectory(data_dir, cwl, spline_df, ax_traj, ax_acc)
             fig.tight_layout()
@@ -1113,15 +1284,22 @@ def run_inference(
 
         elif mode == "experiment":
             fig, (ax_traj, ax_acc) = plt.subplots(
-                1, 2, figsize=(16, 7),
+                1,
+                2,
+                figsize=(16, 7),
                 gridspec_kw={"width_ratios": [2, 1], "wspace": 0.25},
             )
             fig.suptitle(
                 f"Aggregate CWL Trajectory — {STATE_LABELS.get(cwl, cwl)}",
-                fontsize=13, fontweight="bold",
+                fontsize=13,
+                fontweight="bold",
             )
             _plot_aggregate_task_trajectory(
-                data_dir, cwl, spline_df, ax_traj, ax_acc,
+                data_dir,
+                cwl,
+                spline_df,
+                ax_traj,
+                ax_acc,
             )
             fig.tight_layout()
             out_name = f"trajectory_cwl_aggregate_{cwl_label}.png"
@@ -1134,7 +1312,8 @@ def run_inference(
             fig_r.suptitle(
                 f"Accuracy Ribbon — {STATE_LABELS.get(cwl, cwl)}"
                 + (f" — {subject}" if mode == "subject" else ""),
-                fontsize=13, fontweight="bold",
+                fontsize=13,
+                fontweight="bold",
             )
             _draw_spline_background(ax_r, spline_df)
             _plot_spline_accuracy_ribbon(ax_r, spline_df, merged_frames, cwl)
@@ -1155,9 +1334,7 @@ def run_inference(
     print(f"  Loaded {len(data)} rows from {n_sources} session(s).")
 
     if mode == "trial":
-        fig = _make_time_series_figure(
-            data, f"Workload Inference — {subject}"
-        )
+        fig = _make_time_series_figure(data, f"Workload Inference — {subject}")
         figs.append((fig, output_dir / "inference_time_series.png"))
 
     elif mode == "subject":
@@ -1173,7 +1350,8 @@ def run_inference(
             fig2, (ax_task, ax_level) = plt.subplots(1, 2, figsize=(12, 5))
             fig2.suptitle(
                 f"Workload Inference — {subject} — Accuracy Summary",
-                fontsize=13, fontweight="bold",
+                fontsize=13,
+                fontweight="bold",
             )
             plot_subject_accuracy_summary(task_data, ax_task, ax_level)
             fig2.tight_layout()
@@ -1188,7 +1366,8 @@ def run_inference(
         fig2, (ax_overall, ax_per_class) = plt.subplots(1, 2, figsize=(10, 5))
         fig2.suptitle(
             "Real-Time Workload Inference — Accuracy Summary",
-            fontsize=13, fontweight="bold",
+            fontsize=13,
+            fontweight="bold",
         )
         plot_inference_accuracy_summary(data, ax_overall, ax_per_class)
         fig2.tight_layout()
@@ -1201,8 +1380,560 @@ def run_inference(
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Racing experiment
+# ─────────────────────────────────────────────────────────────────────────────
+
+GATE_LAYOUT_FILE = "gate_layout.csv"
+GATE_STATUS_FILE = "gate_status.csv"
+COMMAND_DATA_FILE = "command_data.csv"
+SWARM_SIZE = 9
+
+COMMAND_INPUTS = {
+    "pitch_rate": ("#1976D2", "Pitch"),
+    "yaw_rate": ("#E91E63", "Yaw"),
+    "roll_rate": ("#FF9800", "Roll"),
+    "altitude_rate": ("#4CAF50", "Altitude"),
+}
+
+ADAPTATION_PARAMS = {
+    "max_speed": ("Max Speed", 3.0, 15.0),
+    "max_yaw_rate": ("Max Yaw Rate", 0.6, 1.5),
+    "max_pitch": ("Max Pitch", 0.15, 0.4),
+    "max_roll": ("Max Roll", 0.15, 0.4),
+    "max_ascent_rate": ("Max Ascent", 1.5, 3.0),
+    "max_descent_rate": ("Max Descent", 1.5, 2.5),
+    "max_altitude_rate": ("Max Altitude Rate", 1.5, 3.0),
+    "max_alpha": ("Max Alpha", 6.0, 15.0),
+}
+
+DIFFICULTY_COL = "is_hard"
+
+
+def _load_csv(trial_dir: Path, filename: str) -> pd.DataFrame | None:
+    path = trial_dir / filename
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    return df if not df.empty else None
+
+
+def _compute_centroid(drones: pd.DataFrame) -> pd.DataFrame | None:
+    valid = drones[drones["timestamp"] > 0]
+    if "alive" in valid.columns:
+        alive = valid[valid["alive"] > 0]
+        if not alive.empty:
+            valid = alive
+    if valid.empty:
+        return None
+    centroid = (
+        valid.groupby("timestamp")
+        .agg(
+            x=("position_x", "mean"),
+            y=("position_y", "mean"),
+            z=("position_z", "mean"),
+            n_alive=("id", "nunique"),
+        )
+        .reset_index()
+        .sort_values("timestamp")
+    )
+    t0 = centroid["timestamp"].iloc[0]
+    centroid["elapsed_s"] = (centroid["timestamp"] - t0) / 1000.0
+    return centroid
+
+
+def _gate_passage_times(gate_status: pd.DataFrame) -> pd.DataFrame:
+    passed = gate_status[gate_status["first_pass_timestamp"] > 0].copy()
+    return passed.sort_values("first_pass_timestamp")
+
+
+def _find_t0(inference, centroid, commands, gate_status) -> int:
+    candidates = []
+    for df in [inference, centroid, commands]:
+        if df is not None and "timestamp" in df.columns:
+            valid_ts = df[df["timestamp"] > 0]["timestamp"]
+            if not valid_ts.empty:
+                candidates.append(int(valid_ts.min()))
+    if gate_status is not None:
+        valid_ts = gate_status[gate_status["first_pass_timestamp"] > 0][
+            "first_pass_timestamp"
+        ]
+        if not valid_ts.empty:
+            candidates.append(int(valid_ts.min()))
+    return min(candidates) if candidates else 0
+
+
+def _shade_difficulty_time(ax, gates, gate_status, t0_ms):
+    if DIFFICULTY_COL not in gates.columns or gate_status is None:
+        return
+    passed = _gate_passage_times(gate_status)
+    if len(passed) < 2:
+        return
+    gate_info = gates.set_index("id")
+    pts = []
+    for _, row in passed.iterrows():
+        gid = int(row["id"])
+        if gid in gate_info.index:
+            hard = bool(gate_info.loc[gid, DIFFICULTY_COL])
+            t_s = (row["first_pass_timestamp"] - t0_ms) / 1000.0
+            pts.append((t_s, hard))
+    for i in range(len(pts) - 1):
+        t0_s, _ = pts[i]
+        t1_s, hard = pts[i + 1]
+        color = "#F44336" if hard else "#4CAF50"
+        ax.axvspan(t0_s, t1_s, alpha=0.08, color=color, linewidth=0)
+
+
+def _shade_difficulty_z(ax, gates):
+    if DIFFICULTY_COL not in gates.columns:
+        return
+    sorted_gates = gates.sort_values("center_z")
+    for i in range(len(sorted_gates) - 1):
+        g_next = sorted_gates.iloc[i + 1]
+        hard = bool(g_next[DIFFICULTY_COL])
+        color = "#F44336" if hard else "#4CAF50"
+        ax.axvspan(
+            sorted_gates.iloc[i]["center_z"],
+            g_next["center_z"],
+            alpha=0.06,
+            color=color,
+            linewidth=0,
+        )
+
+
+def _draw_gate_lines(ax, gate_status, t0_ms):
+    passed = _gate_passage_times(gate_status)
+    for _, row in passed.iterrows():
+        t_s = (row["first_pass_timestamp"] - t0_ms) / 1000.0
+        ax.axvline(t_s, color="#aaa", linewidth=0.5, linestyle=":", alpha=0.5)
+
+
+def _no_data_placeholder(ax, title: str):
+    ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", fontsize=10)
+    ax.set_title(title)
+
+
+def _plot_racing_combined(ax, gates, centroid, cwl_merged, gate_status):
+    from matplotlib.collections import LineCollection as _LC
+    from matplotlib.lines import Line2D
+
+    _shade_difficulty_z(ax, gates)
+
+    # Draw gates
+    for _, g in gates.iterrows():
+        is_hard = bool(g.get(DIFFICULTY_COL, 0))
+        color = "#F44336" if is_hard else "#4CAF50"
+        half_w = g["width"] / 2
+        ax.plot(
+            [g["center_z"], g["center_z"]],
+            [g["center_x"] - half_w, g["center_x"] + half_w],
+            color=color,
+            linewidth=2.5,
+            alpha=0.7,
+            solid_capstyle="round",
+        )
+
+    # Gate labels with pass info
+    split_map = {}
+    if gate_status is not None:
+        passed = _gate_passage_times(gate_status)
+        ts_list = passed["first_pass_timestamp"].values
+        for i, (_, row) in enumerate(passed.iterrows()):
+            if i > 0:
+                split_map[int(row["id"])] = (ts_list[i] - ts_list[i - 1]) / 1000.0
+
+    for _, g in gates.iterrows():
+        gid = int(g["id"])
+        half_w = g["width"] / 2
+        label_parts = [f"G{gid}"]
+        if gid in split_map:
+            label_parts.append(f"{split_map[gid]:.1f}s")
+        if gate_status is not None:
+            gs_row = gate_status[gate_status["id"] == gid]
+            if not gs_row.empty:
+                pc = int(gs_row.iloc[0]["pass_count"])
+                if 0 < pc < SWARM_SIZE:
+                    label_parts.append(f"({pc}/{SWARM_SIZE})")
+
+        ax.text(
+            g["center_z"],
+            g["center_x"] + half_w + 4,
+            "\n".join(label_parts),
+            fontsize=6,
+            ha="center",
+            va="bottom",
+            color="#444",
+            fontweight="bold" if gid in split_map else "normal",
+        )
+
+    # Trajectory colored by CWL as a smooth gradient line
+    if cwl_merged is not None and not cwl_merged.empty:
+        z_vals = cwl_merged["z"].values
+        x_vals = cwl_merged["x"].values
+        states = cwl_merged["filtered_state"].values.astype(int)
+
+        points = np.column_stack([z_vals, x_vals]).reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        colors = [STATE_COLORS.get(s, "#999") for s in states[:-1]]
+
+        lc = _LC(segments, colors=colors, linewidths=3, alpha=0.85, zorder=2)
+        ax.add_collection(lc)
+
+        # Start / end markers
+        ax.scatter(
+            z_vals[0],
+            x_vals[0],
+            marker="o",
+            s=80,
+            color="#333",
+            zorder=5,
+            edgecolors="white",
+            linewidths=1.5,
+        )
+        ax.scatter(
+            z_vals[-1],
+            x_vals[-1],
+            marker="s",
+            s=80,
+            color="#333",
+            zorder=5,
+            edgecolors="white",
+            linewidths=1.5,
+        )
+    elif centroid is not None:
+        ax.plot(
+            centroid["z"],
+            centroid["x"],
+            color="#555",
+            linewidth=2,
+            alpha=0.7,
+            zorder=2,
+        )
+
+    # Legend
+    handles = [
+        Line2D([0], [0], color=STATE_COLORS[i], linewidth=3, label=STATE_LABELS[i])
+        for i in range(3)
+    ]
+    if DIFFICULTY_COL in gates.columns:
+        handles += [
+            Line2D(
+                [0], [0], color="#4CAF50", linewidth=2.5, alpha=0.7, label="Easy gate"
+            ),
+            Line2D(
+                [0], [0], color="#F44336", linewidth=2.5, alpha=0.7, label="Hard gate"
+            ),
+        ]
+    handles += [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="#333",
+            linewidth=0,
+            markersize=7,
+            markeredgecolor="white",
+            label="Start",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="s",
+            color="#333",
+            linewidth=0,
+            markersize=7,
+            markeredgecolor="white",
+            label="End",
+        ),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=8)
+
+    ax.set_xlabel("Z — Course Progress (m)")
+    ax.set_ylabel("X — Lateral (m)")
+    ax.set_title("Course Overview — Trajectory colored by CWL, split times at gates")
+    ax.grid(alpha=0.2)
+
+
+def _plot_racing_cwl(ax, inference, gates, gate_status, t0_ms):
+    if inference is None or len(inference) <= 1:
+        _no_data_placeholder(ax, "CWL Inference")
+        return
+
+    inf = inference[inference["timestamp"] > 0].copy()
+    if inf.empty:
+        _no_data_placeholder(ax, "CWL Inference")
+        return
+
+    t = (inf["timestamp"] - t0_ms) / 1000.0
+
+    if gates is not None and gate_status is not None:
+        _shade_difficulty_time(ax, gates, gate_status, t0_ms)
+
+    ax.step(
+        t,
+        inf["raw_state"],
+        where="post",
+        color="#1976D2",
+        linewidth=1,
+        alpha=0.5,
+        label="Raw",
+    )
+    ax.step(
+        t,
+        inf["filtered_state"],
+        where="post",
+        color="#E91E63",
+        linewidth=1.5,
+        label="Filtered",
+    )
+
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels([STATE_LABELS[i] for i in range(3)])
+    ax.set_ylabel("CWL Level")
+    ax.set_ylim(-0.3, 2.5)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title("CWL Inference")
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+
+    if gate_status is not None:
+        _draw_gate_lines(ax, gate_status, t0_ms)
+
+
+def _plot_racing_commands(ax, commands, gate_status, t0_ms):
+    if commands is None:
+        _no_data_placeholder(ax, "Control Inputs")
+        return
+
+    cmd = commands[commands["timestamp"] > 0].copy()
+    if cmd.empty:
+        _no_data_placeholder(ax, "Control Inputs")
+        return
+
+    t = (cmd["timestamp"] - t0_ms) / 1000.0
+
+    for col, (color, label) in COMMAND_INPUTS.items():
+        if col in cmd.columns:
+            ax.plot(t, cmd[col], color=color, linewidth=0.8, alpha=0.8, label=label)
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Input Rate")
+    ax.set_title("Control Inputs")
+    ax.legend(loc="upper right", fontsize=8, ncol=4)
+    ax.grid(alpha=0.3)
+
+    if gate_status is not None:
+        _draw_gate_lines(ax, gate_status, t0_ms)
+
+
+def _plot_racing_adaptation(ax, commands, inference, t0_ms):
+    if commands is None:
+        _no_data_placeholder(ax, "Adaptation Parameters")
+        return
+
+    cmd = commands[commands["timestamp"] > 0].copy()
+    available = [col for col in ADAPTATION_PARAMS if col in cmd.columns]
+
+    if not available or cmd.empty:
+        _no_data_placeholder(ax, "Adaptation Parameters")
+        return
+
+    t = (cmd["timestamp"] - t0_ms) / 1000.0
+
+    # CWL background shading
+    if inference is not None and len(inference) > 1:
+        inf = inference[inference["timestamp"] > 0].copy()
+        if not inf.empty:
+            inf_t = (inf["timestamp"] - t0_ms) / 1000.0
+            for i in range(len(inf) - 1):
+                level = int(inf.iloc[i]["filtered_state"])
+                ax.axvspan(
+                    inf_t.iloc[i],
+                    inf_t.iloc[i + 1],
+                    alpha=0.08,
+                    color=STATE_COLORS.get(level, "#999"),
+                    linewidth=0,
+                )
+
+    for col in available:
+        label, _, _ = ADAPTATION_PARAMS[col]
+        vals = cmd[col]
+        vmin, vmax = float(vals.min()), float(vals.max())
+        if vmax - vmin < 1e-9:
+            normalized = pd.Series(0.5, index=vals.index)
+        else:
+            normalized = (vals - vmin) / (vmax - vmin)
+        ax.plot(
+            t,
+            normalized,
+            linewidth=1.2,
+            label=f"{label} [{vmin:.2f}–{vmax:.2f}]",
+            alpha=0.85,
+        )
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Normalized (0 = restricted, 1 = full)")
+    ax.set_ylim(-0.05, 1.1)
+    ax.set_title("Adaptation Parameters — CWL background")
+    ax.legend(loc="upper right", fontsize=8, ncol=3)
+    ax.grid(alpha=0.3)
+
+
+def _plot_racing_splits(ax, gates, gate_status):
+    if gate_status is None:
+        _no_data_placeholder(ax, "Gate Split Times")
+        return
+
+    passed = _gate_passage_times(gate_status)
+    if len(passed) < 2:
+        _no_data_placeholder(ax, "Gate Split Times")
+        return
+
+    gate_ids = passed["id"].values
+    timestamps = passed["first_pass_timestamp"].values
+    splits = np.diff(timestamps) / 1000.0
+
+    gate_info = gates.set_index("id")
+    colors = []
+    for i in range(1, len(gate_ids)):
+        gid = gate_ids[i]
+        if DIFFICULTY_COL in gate_info.columns and gid in gate_info.index:
+            hard = bool(gate_info.loc[gid, DIFFICULTY_COL])
+            colors.append("#F44336" if hard else "#4CAF50")
+        else:
+            colors.append("#999")
+
+    x = np.arange(len(splits))
+    labels = [f"{gate_ids[i]}→{gate_ids[i + 1]}" for i in range(len(splits))]
+
+    ax.bar(x, splits, color=colors, edgecolor="white", width=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    ax.set_ylabel("Split Time (s)")
+    ax.set_title("Gate Split Times")
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+
+
+def _plot_racing_stats(ax, gates, gate_status, drones, centroid):
+    ax.axis("off")
+
+    lines = []
+
+    if gate_status is not None:
+        passed = _gate_passage_times(gate_status)
+        if len(passed) >= 2:
+            total_s = (
+                passed["first_pass_timestamp"].max()
+                - passed["first_pass_timestamp"].min()
+            ) / 1000.0
+            lines.append(f"Elapsed time (first→last gate):  {total_s:.1f} s")
+
+        n_passed = int((gate_status["pass_count"] > 0).sum())
+        n_full = int((gate_status["pass_count"] >= SWARM_SIZE).sum())
+        lines.append(f"Gates reached:                   {n_passed} / {len(gates)}")
+        lines.append(f"Gates fully passed (9/9):        {n_full} / {len(gates)}")
+
+    if centroid is not None and "n_alive" in centroid.columns:
+        lines.append(
+            f"Min drones alive:                "
+            f"{centroid['n_alive'].min()} / {SWARM_SIZE}"
+        )
+        lines.append(
+            f"Final drones alive:              "
+            f"{centroid['n_alive'].iloc[-1]} / {SWARM_SIZE}"
+        )
+
+    if not lines:
+        lines.append("No performance data available")
+
+    ax.text(
+        0.05,
+        0.9,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        fontsize=11,
+        verticalalignment="top",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8),
+    )
+    ax.set_title("Performance Summary", fontsize=11, fontweight="bold")
+
+
+def run_racing(show: bool, output_dir: Path, data_dir: Path, **_kw):
+    print(f"Loading racing trial data from: {data_dir}")
+
+    gates = _load_csv(data_dir, GATE_LAYOUT_FILE)
+    gate_status = _load_csv(data_dir, GATE_STATUS_FILE)
+    inference = _load_csv(data_dir, INFERENCE_FILE_NAME)
+    commands = _load_csv(data_dir, COMMAND_DATA_FILE)
+    drones = _load_csv(data_dir, DRONE_FILE_NAME)
+
+    if gates is None:
+        print("  ERROR: gate_layout.csv not found")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    centroid = _compute_centroid(drones) if drones is not None else None
+
+    cwl_merged = None
+    if centroid is not None and inference is not None and len(inference) > 1:
+        inf_cols = inference[["timestamp", "filtered_state", "raw_state"]]
+        cwl_merged = pd.merge_asof(
+            centroid.sort_values("timestamp"),
+            inf_cols.sort_values("timestamp"),
+            on="timestamp",
+            direction="backward",
+        ).dropna(subset=["filtered_state"])
+
+    t0_ms = _find_t0(inference, centroid, commands, gate_status)
+    figs: list[tuple[plt.Figure, Path]] = []
+
+    # ── Figure 1: Course Analysis ──
+    fig1 = plt.figure(figsize=(18, 14))
+    gs1 = fig1.add_gridspec(
+        3,
+        1,
+        height_ratios=[3, 1, 1.2],
+        hspace=0.2,
+    )
+    fig1.suptitle("Racing Trial — Course Analysis", fontsize=14, fontweight="bold")
+
+    ax_traj = fig1.add_subplot(gs1[0])
+    ax_cwl = fig1.add_subplot(gs1[1])
+    ax_cmd = fig1.add_subplot(gs1[2], sharex=ax_cwl)
+
+    _plot_racing_combined(ax_traj, gates, centroid, cwl_merged, gate_status)
+    _plot_racing_cwl(ax_cwl, inference, gates, gate_status, t0_ms)
+    _plot_racing_commands(ax_cmd, commands, gate_status, t0_ms)
+
+    ax_cwl.set_xlabel("")
+    plt.setp(ax_cwl.get_xticklabels(), visible=False)
+
+    fig1.tight_layout()
+    figs.append((fig1, output_dir / "racing_course_analysis.png"))
+
+    # ── Figure 2: Adaptation & Performance ──
+    fig2 = plt.figure(figsize=(16, 10))
+    gs = fig2.add_gridspec(2, 2, height_ratios=[2, 1], hspace=0.3, wspace=0.3)
+    fig2.suptitle(
+        "Racing Trial — Adaptation & Performance", fontsize=14, fontweight="bold"
+    )
+    ax_adapt = fig2.add_subplot(gs[0, :])
+    ax_splits = fig2.add_subplot(gs[1, 0])
+    ax_stats = fig2.add_subplot(gs[1, 1])
+
+    _plot_racing_adaptation(ax_adapt, commands, inference, t0_ms)
+    _plot_racing_splits(ax_splits, gates, gate_status)
+    _plot_racing_stats(ax_stats, gates, gate_status, drones, centroid)
+    fig2.tight_layout()
+    figs.append((fig2, output_dir / "racing_adaptation_performance.png"))
+
+    _save_or_show(figs, show)
+
+
 RESULT_TYPES = {
     "inference": run_inference,
+    "racing": run_racing,
 }
 
 
@@ -1217,7 +1948,11 @@ def main():
     parser.add_argument("--data", type=Path, default=_DEFAULT_DATA, metavar="DIR")
     parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT, metavar="DIR")
     parser.add_argument(
-        "--cwl", type=int, default=None, choices=[0, 1, 2], metavar="CWL",
+        "--cwl",
+        type=int,
+        default=None,
+        choices=[0, 1, 2],
+        metavar="CWL",
         help="CWL level to visualize as a trajectory plot: 0=Low, 1=Medium, "
         "2=High.  The corresponding task is resolved automatically per subject.",
     )
