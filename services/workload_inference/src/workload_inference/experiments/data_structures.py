@@ -1,3 +1,5 @@
+"""Data structures for workload inference experiments."""
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -203,16 +205,24 @@ class UserInputData:
     pitch_rate: np.float32
     roll_rate: np.float32
     swarm_spread: np.float32
+    max_pitch: np.float32
+    max_roll: np.float32
+    max_yaw_rate: np.float32
+    max_speed: np.float32
+    max_altitude_rate: np.float32
+    max_alpha: np.float32
+    cwl_total_steps: np.int32
+    cwl_current_step: np.int32
 
     def get_conversion_str(self) -> str:
-        return "<q5f"
+        return "<q11f"
 
     def __len__(self) -> int:
         return self.size()
 
     @classmethod
     def size(cls) -> int:
-        return 8 + 5 * 4
+        return 8 + 11 * 4 + 2 * 4
 
     @classmethod
     def from_buffer(cls, buffer: bytes) -> UserInputData:
@@ -227,6 +237,14 @@ class UserInputData:
             pitch_rate=np.frombuffer(buffer[16:20], dtype=np.float32)[0],
             roll_rate=np.frombuffer(buffer[20:24], dtype=np.float32)[0],
             swarm_spread=np.frombuffer(buffer[24:28], dtype=np.float32)[0],
+            max_pitch=np.frombuffer(buffer[28:32], dtype=np.float32)[0],
+            max_roll=np.frombuffer(buffer[32:36], dtype=np.float32)[0],
+            max_yaw_rate=np.frombuffer(buffer[36:40], dtype=np.float32)[0],
+            max_speed=np.frombuffer(buffer[40:44], dtype=np.float32)[0],
+            max_altitude_rate=np.frombuffer(buffer[44:48], dtype=np.float32)[0],
+            max_alpha=np.frombuffer(buffer[48:52], dtype=np.float32)[0],
+            cwl_total_steps=np.frombuffer(buffer[52:56], dtype=np.int32)[0],
+            cwl_current_step=np.frombuffer(buffer[56:60], dtype=np.int32)[0],
         )
 
     @classmethod
@@ -239,6 +257,14 @@ class UserInputData:
                 pitch_rate=np.float32(data["pitch_rate"]),
                 roll_rate=np.float32(data["roll_rate"]),
                 swarm_spread=np.float32(data["swarm_spread"]),
+                max_pitch=np.float32(data["max_pitch"]),
+                max_roll=np.float32(data["max_roll"]),
+                max_yaw_rate=np.float32(data["max_yaw_rate"]),
+                max_speed=np.float32(data["max_speed"]),
+                max_altitude_rate=np.float32(data["max_altitude_rate"]),
+                max_alpha=np.float32(data["max_alpha"]),
+                cwl_total_steps=np.int32(data["cwl_total_steps"]),
+                cwl_current_step=np.int32(data["cwl_current_step"]),
             )
         except KeyError as e:
             raise ValueError(f"Missing key in data dictionary: {e}") from e
@@ -369,6 +395,8 @@ class ExperimentState(Enum):
     Countdown = 13
     Trial = 14
     Finished = 15
+    ReadyScreen = 16
+    RaceInstructions = 17
 
 
 @dataclass
@@ -388,7 +416,9 @@ class ExperimentStatus:
     current_state: ExperimentState
     next_state: ExperimentState
     current_task: int
+    total_tasks: int
     current_trial: int
+    total_trials: int
     nback_levels_order: list[int]
     current_nback_level: int
     state_enter_timestamp: np.int64
@@ -401,8 +431,12 @@ class ExperimentStatus:
                 current_state=ExperimentState[data["state"]],
                 next_state=ExperimentState[data["nextState"]],
                 current_task=data["currentTask"],
+                total_tasks=data["totalTaskNumber"],
                 current_trial=data["currentTrial"],
-                nback_levels_order=data["nbackLevelsOrder"],
+                total_trials=data["totalTrialNumber"],
+                nback_levels_order=data.get(
+                    "nBackLevelsOrder", []
+                ),  # Optional field, default to empty list if not present
                 state_enter_timestamp=np.int64(data["stateEnterTimestamp"]),
                 current_nback_level=data.get(
                     "currentNBackLevel", -1
@@ -412,3 +446,130 @@ class ExperimentStatus:
             raise ValueError(f"Missing key in data dictionary: {e}") from e
         except ValueError as e:
             raise ValueError(f"Invalid value in data dictionary: {e}") from e
+
+
+@dataclass
+class GateLayoutEntry:
+    """Static gate layout written once when course is generated.
+
+    SM block: ExperimentUnityGateLayout
+    Binary layout (pack=1):
+        id       : 1 byte  (uint8)
+        center_x : 4 bytes (float32)
+        center_y : 4 bytes (float32)
+        center_z : 4 bytes (float32)
+        width    : 4 bytes (float32)
+        height   : 4 bytes (float32)
+        total    : 21 bytes
+    """
+
+    id: np.uint8
+    is_hard: np.uint8
+    center_x: np.float32
+    center_y: np.float32
+    center_z: np.float32
+    width: np.float32
+    height: np.float32
+
+    @classmethod
+    def size(cls) -> int:
+        return 1 + 1 + 4 + 4 + 4 + 4 + 4  # 21 bytes
+
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> "GateLayoutEntry":
+        if len(buffer) < cls.size():
+            raise ValueError(
+                f"Buffer size {len(buffer)} is smaller than expected {cls.size()}."
+            )
+        offset = 0
+        id_ = np.frombuffer(buffer[offset : offset + 1], dtype=np.uint8)[0]
+        offset += 1
+        is_hard = np.frombuffer(buffer[offset : offset + 1], dtype=np.uint8)[0]
+        offset += 1
+        center_x = np.frombuffer(buffer[offset : offset + 4], dtype=np.float32)[0]
+        offset += 4
+        center_y = np.frombuffer(buffer[offset : offset + 4], dtype=np.float32)[0]
+        offset += 4
+        center_z = np.frombuffer(buffer[offset : offset + 4], dtype=np.float32)[0]
+        offset += 4
+        width = np.frombuffer(buffer[offset : offset + 4], dtype=np.float32)[0]
+        offset += 4
+        height = np.frombuffer(buffer[offset : offset + 4], dtype=np.float32)[0]
+        return cls(
+            id=id_,
+            is_hard=is_hard,
+            center_x=center_x,
+            center_y=center_y,
+            center_z=center_z,
+            width=width,
+            height=height,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GateLayoutEntry":
+        return cls(
+            id=np.uint8(data["id"]),
+            is_hard=np.uint8(
+                data.get("is_hard", 0)
+            ),  # Optional, default to 0 if not present
+            center_x=np.float32(data["center"][0]),
+            center_y=np.float32(data["center"][1]),
+            center_z=np.float32(data["center"][2]),
+            width=np.float32(data["width"]),
+            height=np.float32(data["height"]),
+        )
+
+
+@dataclass
+class GateStatusEntry:
+    """Real-time gate status per gate, updated as drones pass through gates.
+
+    SM block: ExperimentUnityGateStatus
+    Binary layout (pack=1):
+        id                   : 1 byte  (uint8)
+        pass_count           : 1 byte  (uint8)   — number of drones that passed
+        gate_state           : 1 byte  (uint8)   — 0=Idle 1=Next 2=PartialComplete 3=Completed
+        first_pass_timestamp : 8 bytes (int64)   — Unix ms, 0 if not yet passed
+        total                : 11 bytes
+    """
+
+    id: np.uint8
+    pass_count: np.uint8
+    gate_state: np.uint8
+    first_pass_timestamp: np.int64
+
+    @classmethod
+    def size(cls) -> int:
+        return 1 + 1 + 1 + 8  # 11 bytes
+
+    @classmethod
+    def from_buffer(cls, buffer: bytes) -> "GateStatusEntry":
+        if len(buffer) < cls.size():
+            raise ValueError(
+                f"Buffer size {len(buffer)} is smaller than expected {cls.size()}."
+            )
+        offset = 0
+        id_ = np.frombuffer(buffer[offset : offset + 1], dtype=np.uint8)[0]
+        offset += 1
+        pass_count = np.frombuffer(buffer[offset : offset + 1], dtype=np.uint8)[0]
+        offset += 1
+        gate_state = np.frombuffer(buffer[offset : offset + 1], dtype=np.uint8)[0]
+        offset += 1
+        first_pass_timestamp = np.frombuffer(
+            buffer[offset : offset + 8], dtype=np.int64
+        )[0]
+        return cls(
+            id=id_,
+            pass_count=pass_count,
+            gate_state=gate_state,
+            first_pass_timestamp=first_pass_timestamp,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GateStatusEntry":
+        return cls(
+            id=np.uint8(data["id"]),
+            pass_count=np.uint8(data["pass_count"]),
+            gate_state=np.uint8(data["gate_state"]),
+            first_pass_timestamp=np.int64(data["first_pass_timestamp"]),
+        )

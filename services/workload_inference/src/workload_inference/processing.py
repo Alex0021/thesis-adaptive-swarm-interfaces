@@ -1,5 +1,7 @@
 from collections import deque
-from workload_inference.data_structures import GazeData
+
+from workload_inference.experiments.data_structures import GazeData
+
 
 class DataProcessor:
     """
@@ -28,8 +30,10 @@ class DataProcessor:
             int: The number of data points.
         """
         return len(self._data_buffer)
-    
-    def get_samples(self, range_start: int = 0, range_end: int | None = None) -> list[GazeData]:
+
+    def get_samples(
+        self, range_start: int = 0, range_end: int | None = None
+    ) -> list[GazeData]:
         """
         Get data points from the buffer within the specified range.
 

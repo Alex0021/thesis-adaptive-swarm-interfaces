@@ -17,6 +17,7 @@ dependencies = [
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "pytorch-tabnet>=4.1.0",
+    "eye-metrics @ git+https://github.com/Alex0021/thesis-eye-metrics-core.git@v1.2",
 ]
 
 [dependency-groups]
@@ -106,6 +107,5 @@ select = [
     "G",
 ]
 
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+[tool.uv.extra-build-dependencies]
+eye-metrics = ["hatchling"]

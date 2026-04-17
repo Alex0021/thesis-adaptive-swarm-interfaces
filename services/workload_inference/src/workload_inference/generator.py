@@ -4,17 +4,18 @@ Runs a background thread that emits smooth gaze points at a fixed frequency
 and calls a user-provided callback with a list containing one `GazeData`.
 The generated screen coordinates are normalized in [0, 1].
 """
+
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
-import logging
 from typing import Callable, Optional
 
 import numpy as np
 
-from workload_inference.data_structures import GazeData, DroneData
+from workload_inference.experiments.data_structures import DroneData, GazeData
 
 logger = logging.getLogger("FakeGazeGenerator")
 
@@ -123,8 +124,12 @@ class FakeGazeGenerator:
                 right_point_screen_y=np.float32(right_y),
                 left_validity=np.int8(0),
                 right_validity=np.int8(0),
-                left_pupil_diameter=np.float32(self.pupil_mean + np.random.randn() * 0.1),
-                right_pupil_diameter=np.float32(self.pupil_mean + np.random.randn() * 0.1),
+                left_pupil_diameter=np.float32(
+                    self.pupil_mean + np.random.randn() * 0.1
+                ),
+                right_pupil_diameter=np.float32(
+                    self.pupil_mean + np.random.randn() * 0.1
+                ),
             )
 
             # callback with a single-element list for compatibility
@@ -145,7 +150,7 @@ class FakeGazeGenerator:
 
 class FakeDroneGenerator:
     """Generate fake drone data for testing.
-    
+
     Generates data from a drone looping in a circle while oscillating up and down
     """
 
@@ -206,7 +211,7 @@ class FakeDroneGenerator:
 
             drone_data = DroneData(
                 timestamp=np.int64(time.time() * 1_000),
-                id = 0,
+                id=0,
                 position_x=np.float32(x),
                 position_y=np.float32(y),
                 position_z=np.float32(z),

@@ -7,7 +7,8 @@ from .engine import (
     WorkloadInferenceEngine,
 )
 from .filters import SmoothingSchmittFilter, WorkloadFilter
-from .online_stats import OnlinePupilStats, WelfordNormalizer
+from eye_metrics.features.normalization import WelfordNormalizer
+from eye_metrics.preprocessing.outliers import OnlinePupilStats
 from .settings import InferenceSettings
 
 WORKLOAD_LABELS = {-1: "Unknown", 0: "Low", 1: "Medium", 2: "High"}
