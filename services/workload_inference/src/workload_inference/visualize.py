@@ -13,6 +13,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -23,7 +24,8 @@ from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
 from matplotlib.widgets import Button, Slider
 from numpy.typing import NDArray
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QRect, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -35,10 +37,11 @@ from PyQt6.QtWidgets import (
 )
 
 from workload_inference.constants import DATA_DIR
-from workload_inference.data_structures import DroneData, GazeData, Listener
+from workload_inference.experiments.data_structures import DroneData, GazeData, Listener
 from workload_inference.inference import (
     WORKLOAD_COLORS,
     WORKLOAD_LABELS,
+    InferenceSettings,
     WorkloadInferenceEngine,
 )
 
@@ -57,6 +60,8 @@ DRONE_COLORS = [
     "#7f7f7f",
     "#bcbd22",
 ]
+
+logger = logging.getLogger("visualize")
 
 
 class DroneDataCanvas(FigureCanvas):
@@ -476,18 +481,11 @@ class DroneDataCanvas(FigureCanvas):
             if self._alt_bar_rect is not None:
                 self._alt_bar_rect.remove()
 
-            from matplotlib.patches import Rectangle
-
-            self._vel_bar_rect = Rectangle((0, 0), 1, vel_h, color="#2196F3")
+            self._vel_bar_rect = self._make_vel_rect(vel_h)
             self.ax_vel.add_patch(self._vel_bar_rect)
             self._vel_bar_rect.set_animated(True)
 
-            self._alt_bar_rect = Rectangle(
-                (0, self.alt_min),
-                1,
-                alt_h - self.alt_min,
-                color="#4CAF50",
-            )
+            self._alt_bar_rect = self._make_alt_rect(alt_h)
             self.ax_alt.add_patch(self._alt_bar_rect)
             self._alt_bar_rect.set_animated(True)
         else:
@@ -498,6 +496,18 @@ class DroneDataCanvas(FigureCanvas):
             if self._alt_bar_rect is not None:
                 self._alt_bar_rect.remove()
                 self._alt_bar_rect = None
+
+    def _make_vel_rect(self, vel_h: float):
+        """Create and return the velocity bar Rectangle. Overridable for orientation."""
+        from matplotlib.patches import Rectangle
+
+        return Rectangle((0, 0), 1, vel_h, color="#2196F3")
+
+    def _make_alt_rect(self, alt_h: float):
+        """Create and return the altitude bar Rectangle. Overridable for orientation."""
+        from matplotlib.patches import Rectangle
+
+        return Rectangle((0, self.alt_min), 1, alt_h - self.alt_min, color="#4CAF50")
 
     def datas_callback(
         self, datas: Sequence[DroneData], batch_update: bool = False
@@ -535,6 +545,348 @@ class DroneDataCanvas(FigureCanvas):
                 if drone_data.alive:
                     self._dead_pos[drone_id, 0] = float(drone_data.position_z)
                     self._dead_pos[drone_id, 1] = float(drone_data.position_x)
+
+
+class DroneDataCanvasGateRacing(FigureCanvas):
+    """Standalone canvas for gate racing experiments.
+
+    Shows gates, path connections, and the swarm as a single heading triangle.
+    No drone trails or individual position markers.
+    """
+
+    GATE_YLIM_CENTER = 400.0  # Y-axis center (course centerline)
+    GATE_YLIM_HALF_WIDTH = 100.0  # Y-axis half-width around centerline
+    GATE_HEIGHT_SCALE = 2.5  # Multiplier for gate Y-axis (height) dimension
+    SWARM_DIAMOND_LONG = 15.0  # Diamond half-length along heading axis
+    SWARM_DIAMOND_SHORT = 4.0  # Diamond half-width perpendicular to heading
+    GATE_COLORS_BY_STATE = {
+        0: "#4a4a4a",  # Idle (dark gray)
+        1: "#1e88e5",  # Next/current (blue)
+        2: "#f9a825",  # PartialComplete (orange)
+        3: "#66bb6a",  # Completed (green)
+    }
+    TERRAIN_BASE_ALTITUDE = 20.0  # Base altitude for terrain (for visualization only)
+
+    def __init__(
+        self,
+        parent: QMainWindow | None = None,
+        num_drones: int = 9,
+        update_freq: int = 30,
+        vel_max: float = 15.0,
+        alt_min: float = 0.0,
+        alt_max: float = 50.0,
+        gates: list[Any] | None = None,
+    ):
+        self.fig = Figure(figsize=(8, 4), dpi=100)
+        super().__init__(self.fig)
+
+        self.num_drones = num_drones
+        self.update_freq = update_freq
+        self.vel_max = vel_max
+        self.alt_min = alt_min
+        self.alt_max = alt_max
+        self.gates = gates or []
+
+        self._gate_rectangles: list[mpatches.Rectangle] = []
+        self._gate_connection_lines: list[Any] = []
+        self._gate_texts: list[Any] = []
+        self._gate_statuses: dict[int, Any] = {}
+        self._swarm_triangle: Any = None
+        self._vel_bar_rect: Any = None
+        self._alt_bar_rect: Any = None
+
+        # Latest drone state — no history needed, just current values
+        self._alive = np.zeros(num_drones, dtype=bool)
+        self._pos_z = np.zeros(num_drones)
+        self._pos_x = np.zeros(num_drones)
+        self._last_vel = np.zeros((num_drones, 3))
+        self._last_alt = np.zeros(num_drones)
+        self._last_yaw = np.zeros(num_drones)
+
+        # Axes
+        self.ax = self.fig.add_axes([0.08, 0.25, 0.88, 0.65])
+        self.ax_vel = self.fig.add_axes([0.05, 0.10, 0.44, 0.05])
+        self.ax_alt = self.fig.add_axes([0.52, 0.10, 0.44, 0.05])
+
+        # Blit state
+        self._background = None
+        self._blit_ready = False
+
+        self._init_plots()
+
+        self.mpl_connect("draw_event", self._on_draw)
+        self.mpl_connect("resize_event", self._on_resize)
+        self._init_blit()
+
+        self._timer = QTimer(parent)
+        self._timer.timeout.connect(self._update_all)
+        self._timer.start(1000 // self.update_freq)
+
+    def _init_plots(self) -> None:
+        self.ax.set_title("Swarm Position - Gate Racing (Top-Down)")
+        self.ax.set_xlabel("Z")
+        self.ax.set_ylabel("X")
+        self.ax.set_facecolor("white")
+
+        self._draw_gates()
+        self._draw_gate_connections()
+        self._set_axis_limits()
+
+        # Velocity bar — horizontal at bottom left
+        self.ax_vel.set_xlim(0, self.vel_max)
+        self.ax_vel.set_ylim(0, 1)
+        self.ax_vel.set_yticks([])
+        self.ax_vel.set_xlabel("Vel (m/s)", fontsize=8)
+        self.ax_vel.axvspan(0, self.vel_max, color="lightgray", zorder=0)
+
+        # Altitude bar — horizontal at bottom right
+        self.ax_alt.set_xlim(self.alt_min, self.alt_max)
+        self.ax_alt.set_ylim(0, 1)
+        self.ax_alt.set_yticks([])
+        self.ax_alt.set_xlabel("Alt (m)", fontsize=8)
+        self.ax_alt.axvspan(self.alt_min, self.alt_max, color="lightgray", zorder=0)
+
+    def _set_axis_limits(self) -> None:
+        """Set axis limits and Y inversion. Called on init and when gates change."""
+        # Y-axis: fixed range around centerline, inverted (low values at top)
+        self.ax.set_ylim(
+            self.GATE_YLIM_CENTER + self.GATE_YLIM_HALF_WIDTH,
+            self.GATE_YLIM_CENTER - self.GATE_YLIM_HALF_WIDTH,
+        )
+        # X-axis: fit to gate positions with padding, or default
+        if self.gates:
+            min_z = min(g.center_z for g in self.gates)
+            max_z = max(g.center_z for g in self.gates)
+            pad_z = (max_z - min_z) * 0.1 if max_z != min_z else 5
+            self.ax.set_xlim(min_z - pad_z, max_z + pad_z)
+        else:
+            self.ax.set_xlim(-100, 100)
+
+    def _draw_gates(self) -> None:
+        """Draw gates as colored rectangles based on their current state."""
+        self._gate_rectangles.clear()
+        self._gate_texts.clear()
+        for gate in self.gates:
+            gate_status = self._gate_statuses.get(int(gate.id))
+            if gate_status is None:
+                state = 0
+            else:
+                pass_count = int(gate_status.get("pass_count", 0))
+                if pass_count == 0:
+                    state = int(gate_status.get("gate_state", 0))
+                elif pass_count < self.num_drones:
+                    state = 2
+                else:
+                    state = 3
+
+            color = self.GATE_COLORS_BY_STATE.get(state, "#1e88e5")
+            scaled_height = gate.height * self.GATE_HEIGHT_SCALE
+            rect = mpatches.Rectangle(
+                (gate.center_z - gate.width / 2, gate.center_x - scaled_height / 2),
+                gate.width,
+                scaled_height,
+                linewidth=2,
+                edgecolor=color,
+                facecolor=color,
+                alpha=0.35,
+                zorder=3,
+            )
+            self.ax.add_patch(rect)
+            self._gate_rectangles.append(rect)
+            txt = self.ax.text(
+                gate.center_z,
+                gate.center_x,
+                f"{gate.id}",
+                ha="center",
+                va="center",
+                fontsize=8,
+                fontweight="bold",
+                color="black",
+                zorder=4,
+            )
+            self._gate_texts.append(txt)
+
+    def _draw_gate_connections(self) -> None:
+        """Draw dashed lines connecting successive gates along the racing path."""
+        self._gate_connection_lines.clear()
+        if len(self.gates) < 2:
+            return
+        sorted_gates = sorted(self.gates, key=lambda g: g.center_z)
+        for i in range(len(sorted_gates) - 1):
+            g1, g2 = sorted_gates[i], sorted_gates[i + 1]
+            (line,) = self.ax.plot(
+                [g1.center_z, g2.center_z],
+                [g1.center_x, g2.center_x],
+                linestyle="--",
+                color="#aaaaaa",
+                linewidth=1,
+                alpha=0.7,
+                zorder=2,
+            )
+            self._gate_connection_lines.append(line)
+
+    def _init_blit(self) -> None:
+        self.draw()
+        self._background = self.copy_from_bbox(self.fig.bbox)
+        self._blit_ready = True
+
+    def _on_draw(self, _event: Any) -> None:
+        self._background = self.copy_from_bbox(self.fig.bbox)
+        self._blit_ready = True
+
+    def _on_resize(self, _event: Any) -> None:
+        self._blit_ready = False
+        self.draw()
+
+    def _update_all(self) -> None:
+        self._update_display()
+        self._blit_update()
+
+    def _update_display(self) -> None:
+        """Update the animated swarm triangle and velocity/altitude bars."""
+        alive_ids = np.where(self._alive)[0]
+
+        if alive_ids.size == 0:
+            if self._swarm_triangle is not None:
+                self._swarm_triangle.set_visible(False)
+            if self._vel_bar_rect is not None:
+                self._vel_bar_rect.set_width(0)
+            if self._alt_bar_rect is not None:
+                self._alt_bar_rect.set_width(0)
+            return
+
+        # Swarm centroid and heading
+        centroid_z = float(self._pos_z[alive_ids].mean())
+        centroid_x = float(self._pos_x[alive_ids].mean())
+        heading = float(self._last_yaw[alive_ids].mean())
+
+        # Stretched triangle: tip forward, base at the back
+        sl = self.SWARM_DIAMOND_LONG  # distance from centroid to tip
+        sw = self.SWARM_DIAMOND_SHORT  # half-width of base
+        tip = np.array(
+            [centroid_z + sl * np.cos(heading), centroid_x + sl * np.sin(heading)]
+        )
+        left = np.array(
+            [
+                centroid_z + sw * np.cos(heading + np.pi / 2),
+                centroid_x + sw * np.sin(heading + np.pi / 2),
+            ]
+        )
+        right = np.array(
+            [
+                centroid_z + sw * np.cos(heading - np.pi / 2),
+                centroid_x + sw * np.sin(heading - np.pi / 2),
+            ]
+        )
+        triangle = np.array([tip, left, right])
+
+        if self._swarm_triangle is None:
+            self._swarm_triangle = mpatches.Polygon(
+                triangle,
+                closed=True,
+                edgecolor="#333333",
+                facecolor="#ff3333",
+                alpha=0.9,
+                zorder=5,
+            )
+            self._swarm_triangle.set_animated(True)
+            self.ax.add_patch(self._swarm_triangle)
+        else:
+            self._swarm_triangle.set_xy(triangle)
+            self._swarm_triangle.set_visible(True)
+
+        # Velocity bar
+        vel_data = self._last_vel[alive_ids]
+        mean_speed = float(np.mean(np.linalg.norm(vel_data, axis=1)))
+        vel_h = float(np.clip(mean_speed, 0, self.vel_max))
+
+        # Altitude bar
+        mean_alt = (
+            float(np.mean(self._last_alt[alive_ids])) - self.TERRAIN_BASE_ALTITUDE
+        )
+        alt_h = float(np.clip(mean_alt, self.alt_min, self.alt_max))
+
+        from matplotlib.patches import Rectangle
+
+        if self._vel_bar_rect is None:
+            self._vel_bar_rect = Rectangle((0, 0), vel_h, 1, color="#2196F3")
+            self._vel_bar_rect.set_animated(True)
+            self.ax_vel.add_patch(self._vel_bar_rect)
+        else:
+            self._vel_bar_rect.set_width(vel_h)
+
+        if self._alt_bar_rect is None:
+            self._alt_bar_rect = Rectangle(
+                (self.alt_min, 0), alt_h - self.alt_min, 1, color="#4CAF50"
+            )
+            self._alt_bar_rect.set_animated(True)
+            self.ax_alt.add_patch(self._alt_bar_rect)
+        else:
+            self._alt_bar_rect.set_width(alt_h - self.alt_min)
+
+    def _blit_update(self) -> None:
+        if not self._blit_ready or self._background is None:
+            self.draw_idle()
+            return
+        self.restore_region(self._background)
+        if self._swarm_triangle is not None:
+            self.ax.draw_artist(self._swarm_triangle)
+        if self._vel_bar_rect is not None:
+            self.ax_vel.draw_artist(self._vel_bar_rect)
+        if self._alt_bar_rect is not None:
+            self.ax_alt.draw_artist(self._alt_bar_rect)
+        self.blit(self.fig.bbox)
+
+    def update_gates(self, gates: list[Any]) -> None:
+        """Update gate layout and redraw static elements."""
+        self.gates = gates
+        for rect in self._gate_rectangles:
+            rect.remove()
+        self._gate_rectangles.clear()
+        for line in self._gate_connection_lines:
+            line.remove()
+        self._gate_connection_lines.clear()
+        for txt in self._gate_texts:
+            txt.remove()
+        self._gate_texts.clear()
+        self._draw_gates()
+        self._draw_gate_connections()
+        self._set_axis_limits()
+        self._blit_ready = False
+        self.draw_idle()
+
+    def update_gate_statuses(self, statuses: dict[int, dict[str, Any]]) -> None:
+        """Update gate state colors. Only redraws if statuses changed."""
+        if statuses == self._gate_statuses:
+            return
+        self._gate_statuses = statuses
+        for rect in self._gate_rectangles:
+            rect.remove()
+        self._gate_rectangles.clear()
+        for txt in self._gate_texts:
+            txt.remove()
+        self._gate_texts.clear()
+        self._draw_gates()
+        self._blit_ready = False
+        self.draw_idle()
+
+    def datas_callback(
+        self, datas: Sequence[DroneData], batch_update: bool = False
+    ) -> None:
+        """Store latest drone state (position, velocity, altitude, yaw)."""
+        if batch_update:
+            self._alive[:] = False
+        for drone_data in datas:
+            drone_id = int(drone_data.id)
+            if 0 <= drone_id < self.num_drones:
+                self._alive[drone_id] = bool(drone_data.alive)
+                self._pos_z[drone_id] = float(drone_data.position_z)
+                self._pos_x[drone_id] = float(drone_data.position_x)
+                self._last_vel[drone_id, 0] = drone_data.velocity_x
+                self._last_vel[drone_id, 1] = drone_data.velocity_y
+                self._last_vel[drone_id, 2] = drone_data.velocity_z
+                self._last_alt[drone_id] = float(drone_data.position_y)
+                self._last_yaw[drone_id] = float(drone_data.orientation_y)
 
 
 class GazeDataCanvas(FigureCanvas):
@@ -662,7 +1014,6 @@ class GazeDataCanvas(FigureCanvas):
         self.ax_pupil.set_title("Pupil Diameter Trend")
         self.ax_pupil.set_xlabel("Sample Index")
         self.ax_pupil.set_ylabel("Diameter (mm)")
-        self.ax_pupil.legend(["Left", "Right", "Mean"])
         self.ax_pupil.set_xlim(-self.window_size, 0)
         self.ax_pupil.set_ylim(2, 5)
 
@@ -695,7 +1046,7 @@ class GazeDataCanvas(FigureCanvas):
     def _blit_update(self):
         """Fast redraw using blitting"""
         if not self._blit_ready or self._background is None:
-            self.draw()
+            self.draw_idle()
             return
 
         self.restore_region(self._background)
@@ -858,6 +1209,81 @@ class GazeDataCanvas(FigureCanvas):
                 self._buf_len += 1
 
 
+class PilotProfileBar(QWidget):
+    """Horizontal bar showing the current CWL controller profile step.
+
+    Draws a track from 0 ('soft') to total_steps ('racing') with a red
+    vertical marker at current_step. Pure Qt paintEvent — no matplotlib.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._total_steps: int = 1  # avoids division by zero until first data
+        self._current_step: int = 0
+        self.setMinimumHeight(36)
+
+    def set_profile(self, total_steps: int, current_step: int) -> None:
+        """Update values and schedule a repaint (GUI-thread safe)."""
+        self._total_steps = max(1, int(total_steps))
+        self._current_step = max(0, min(int(current_step), self._total_steps))
+        self.update()  # queue a Qt repaint
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Clip to the dirty region Qt reports — Qt composites only that area
+        # via its native double-buffered backing store (no separate blit needed)
+        painter.setClipRect(event.rect())
+
+        w, h = self.width(), self.height()
+        margin_side = 6
+        margin_v = 2  # vertical margin
+        label_h = 12  # height reserved for "soft" / "racing" text
+        track_y = margin_v
+        track_h = h - label_h - 2 * margin_v
+        track_x = margin_side
+        track_w = w - 2 * margin_side
+
+        # Track background
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#444444"))
+        painter.drawRoundedRect(track_x, track_y, track_w, track_h, 3, 3)
+
+        # Red marker
+        frac = self._current_step / self._total_steps
+        marker_x = track_x + int(frac * track_w)
+        marker_w = max(3, track_w // (self._total_steps + 1))
+        painter.setBrush(QColor("#e53935"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(marker_x - marker_w // 2, track_y, marker_w, track_h)
+
+        # "soft" / "racing" labels
+        small_font = QFont()
+        small_font.setPointSize(7)
+        painter.setFont(small_font)
+        painter.setPen(QColor("#aaaaaa"))
+        label_y = track_y + track_h + 1
+        painter.drawText(
+            QRect(track_x, label_y, 30, label_h), Qt.AlignmentFlag.AlignLeft, "soft"
+        )
+        painter.drawText(
+            QRect(track_x, label_y, track_w, label_h),
+            Qt.AlignmentFlag.AlignRight,
+            "racing",
+        )
+
+        # Step counter centred on marker
+        painter.setPen(QColor("white"))
+        counter_font = QFont()
+        counter_font.setPointSize(7)
+        painter.setFont(counter_font)
+        painter.drawText(
+            QRect(track_x, track_y, track_w, track_h),
+            Qt.AlignmentFlag.AlignCenter,
+            f"{self._current_step}/{self._total_steps}",
+        )
+
+
 class WorkloadDisplayWidget(QWidget):
     """Widget displaying real-time cognitive workload estimation.
 
@@ -895,6 +1321,11 @@ class WorkloadDisplayWidget(QWidget):
         self._latest_filtered_class: int = -1
         self._latest_probabilities: np.ndarray = np.zeros(3)
         self._dirty = False  # flag: new data since last UI refresh
+
+        # CWL profile data from user input receiver
+        self._cwl_total_steps: int = 1
+        self._cwl_current_step: int = 0
+        self._cwl_dirty: bool = False
 
         self._init_ui()
 
@@ -990,7 +1421,11 @@ class WorkloadDisplayWidget(QWidget):
         bottom_row.addLayout(bars_col, 1)
         root.addLayout(bottom_row, 0)
 
-        self.setMinimumHeight(140)
+        # --- Row 3: Pilot Profile bar ---
+        self._profile_bar = PilotProfileBar(self)
+        root.addWidget(self._profile_bar, 0)
+
+        self.setMinimumHeight(180)
         if DEBUG_MOCKUP_DATA:
             self._add_mockup_data()
 
@@ -1070,6 +1505,17 @@ class WorkloadDisplayWidget(QWidget):
             self._latest_probabilities = probabilities.copy()
             self._dirty = True
 
+    def on_user_input_data(self, datas) -> None:
+        """Called from the _user_input_receiver background thread.
+
+        Only writes plain ints under the lock — no Qt access.
+        """
+        with self._data_lock:
+            if len(datas) > 0:
+                self._cwl_total_steps = int(datas[-1].cwl_total_steps)
+                self._cwl_current_step = int(datas[-1].cwl_current_step) + 1
+                self._cwl_dirty = True
+
     # ------------------------------------------------------------------
     # GUI-thread refresh (called by QTimer, safe to touch widgets)
     # ------------------------------------------------------------------
@@ -1077,15 +1523,20 @@ class WorkloadDisplayWidget(QWidget):
     def _refresh_ui(self) -> None:
         """Read latest data and update all Qt widgets + matplotlib."""
         with self._data_lock:
-            if not self._dirty:
+            if not (self._dirty or self._cwl_dirty):
                 return
-            self._dirty = False
             # Snapshot the data while holding the lock
             timestamps = list(self._history_timestamps)
             raw = list(self._history_raw)
             filtered = list(self._history_filtered)
             filt_class = self._latest_filtered_class
             proba = self._latest_probabilities.copy()
+            # Snapshot CWL data
+            cwl_dirty = self._cwl_dirty
+            cwl_total = self._cwl_total_steps
+            cwl_current = self._cwl_current_step
+            self._dirty = False
+            self._cwl_dirty = False
 
         # -- Update class label --
         label = WORKLOAD_LABELS.get(filt_class, "???")
@@ -1114,6 +1565,10 @@ class WorkloadDisplayWidget(QWidget):
             self._history_canvas.draw_idle()
 
         self._info_label.setText(f"Inferences: {len(raw)}")
+
+        # -- Update pilot profile bar --
+        if cwl_dirty:
+            self._profile_bar.set_profile(cwl_total, cwl_current)
 
 
 class ReplaySlider:
@@ -1173,6 +1628,12 @@ class ReplayData:
             self._logger.error("Gaze data file not found in %s", trial_folder)
         try:
             self.drone_data = pd.read_csv(trial_folder / "drone_data.csv")
+            # Check if 'alive' column exists, if not create it and assume all drones are alive
+            if "alive" not in self.drone_data.columns:
+                self._logger.warning(
+                    "'alive' column not found in drone data. Assuming all drones are alive."
+                )
+                self.drone_data["alive"] = True
         except FileNotFoundError:
             self._logger.error("Drone data file not found in %s", trial_folder)
 
@@ -1418,16 +1879,16 @@ class ExperimentDataReplayWindow(QMainWindow):
         self.gaze_visualizer = GazeDataCanvas(parent=self)
         self.drone_visualizer = DroneDataCanvas(parent=self)
 
-        # Workload inference engine + display
-        from workload_inference.inference import InferenceSettings
+        inf_settings_path = model_path.parent / "settings.yml" if model_path else None
+        if inf_settings_path and inf_settings_path.is_file():
+            inf_settings = InferenceSettings.from_yaml(inf_settings_path)
+        else:
+            inf_settings = InferenceSettings(
+                model_type="tabnet"
+            )  # Use default settings if no file
 
         self.workload_engine = WorkloadInferenceEngine.create(
-            model_path=model_path,
-            settings=InferenceSettings(
-                window_size_samples=600,  # 10s at 60 Hz
-                inference_interval_samples=60,  # 1s at 60 Hz
-                smoothing_predictions=5,
-            ),
+            model_path=model_path, settings=inf_settings
         )
         self.workload_display = WorkloadDisplayWidget(
             parent=self, engine=self.workload_engine
