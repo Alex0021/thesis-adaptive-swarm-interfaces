@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import logging
 import os
@@ -14,8 +15,7 @@ import numpy as np
 import zmq
 from PyQt6.QtWidgets import QApplication
 
-import workload_inference.data_structures as dts
-from workload_inference.experiment import ExperimentManager, ExperimentManagerWindow
+import workload_inference.experiments.data_structures as dts
 from workload_inference.generator import FakeGazeGenerator
 from workload_inference.processing import DataProcessor
 from workload_inference.py_receiver import (
@@ -27,19 +27,47 @@ from workload_inference.py_receiver import (
 
 def setup_logging():
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s::%(message)s",
         handlers=[logging.StreamHandler()],
     )
 
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Run workload inference experiment (N-back or gate racing)"
+    )
+    parser.add_argument(
+        "--experiment",
+        choices=["nback", "gates"],
+        default="nback",
+        help="Which experiment to run (default: nback)",
+    )
+    args = parser.parse_args()
+
     app = QApplication([])
     setup_logging()
     logger = logging.getLogger()
-    logger.info("Workload Inference Service Started")
+    logger.info("Workload Inference Service Started (experiment: %s)", args.experiment)
 
     try:
+        # Import the appropriate experiment module
+        if args.experiment == "nback":
+            from workload_inference.experiments import (
+                NBackExperimentManager as ExperimentManager,
+            )
+            from workload_inference.experiments import (
+                NBackExperimentManagerWindow as ExperimentManagerWindow,
+            )
+        else:  # gate_racing
+            from workload_inference.experiments import (
+                GateRacingExperimentManager as ExperimentManager,
+            )
+            from workload_inference.experiments import (
+                GateRacingExperimentManagerWindow as ExperimentManagerWindow,
+            )
+
         experiment_manager = ExperimentManager()
         experiment_window = ExperimentManagerWindow(experiment_manager)
         experiment_window.show()
@@ -82,7 +110,7 @@ def main():
     # receiver.start()
     # experiment_manager.start_recording()
     except Exception as e:
-        logger.error("%s", e)
+        logger.exception("%s", e, stack_info=True)
         return
     try:
         # while True:

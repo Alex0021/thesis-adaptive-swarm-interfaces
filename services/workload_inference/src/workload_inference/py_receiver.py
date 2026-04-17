@@ -7,7 +7,7 @@ import time
 import numpy as np
 import zmq
 
-import workload_inference.data_structures as dts
+import workload_inference.experiments.data_structures as dts
 from workload_inference.utilities import ConsoleManager
 
 
@@ -25,6 +25,10 @@ class PyReceiverBase:
         self._listeners: list[dts.Listener] = []
         """Listeners for data updates. Each listener is a callable function 
         that takes a list of Dataclass instances as an argument."""
+
+        self._on_data_changed_listeners: list[dts.Listener] = []
+        """ Listeners for data upadtes only. Triggered when the timestamp of 
+        the received data changes. Each listener is a callable function"""
 
         self._monitor: Monitor = Monitor()
         self._console: ConsoleManager = ConsoleManager()
@@ -48,12 +52,24 @@ class PyReceiverBase:
             if listener not in self._listeners:
                 self._listeners.append(listener)
 
+    def register_on_data_changed_listener(self, listener: dts.Listener) -> None:
+        """
+        Register a listener to receive data updates only when the timestamp changes.
+
+        Args:
+            listener (Listener): A callable to receive a list of Dataclass instances.
+        """
+        with self._lock:
+            if listener not in self._on_data_changed_listeners:
+                self._on_data_changed_listeners.append(listener)
+
     def clear_listeners(self) -> None:
         """
         Clear all registered listeners.
         """
         with self._lock:
             self._listeners.clear()
+            self._on_data_changed_listeners.clear()
 
     def pretty_print_gaze_data(self, gaze_data: dts.GazeData) -> None:
         """
@@ -132,6 +148,9 @@ class SMReceiver(PyReceiverBase):
             with self._lock:
                 for listener in self._listeners:
                     listener(datas)
+                if self._data_timestamp != self._last_timestamp:
+                    for listener in self._on_data_changed_listeners:
+                        listener(datas)
             # Update monitor
             self._monitor.update(len(datas))
 
@@ -145,6 +164,7 @@ class SMReceiver(PyReceiverBase):
 
             elapsed = time.perf_counter() - loop_start
             remaining = target_interval - elapsed
+            self._last_timestamp = self._data_timestamp
             if remaining > 0:
                 time.sleep(remaining)
 

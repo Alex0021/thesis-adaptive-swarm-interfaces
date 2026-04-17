@@ -3,11 +3,12 @@ import logging
 import sys
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from queue import Queue
 from typing import Any, Callable, Iterable, List, Optional, Sequence
 
-from workload_inference.data_structures import DataclassLike
+from workload_inference.experiments.data_structures import DataclassLike
 
 
 class ConsoleManager:
@@ -84,6 +85,10 @@ class ExperimentDataWriter:
             to the object's __dict__ values.
     """
 
+    class WriterMode(Enum):
+        CONINUOUS = "continuous"
+        SNAPSHOT = "snapshot"
+
     WAIT_BLOCK_TIMEOUT: float = 0.01
     """Wait delay if block is not yet full."""
 
@@ -96,6 +101,7 @@ class ExperimentDataWriter:
         formatter: Optional[Callable[[Any], str]] = None,
         name: str = "anonymous",
         encoding: str = "utf-8",
+        mode: WriterMode = WriterMode.CONINUOUS,
     ) -> None:
         self.filepath = filepath
         self._block_size = int(block_size)
@@ -103,7 +109,9 @@ class ExperimentDataWriter:
         self._header: Optional[List[str]] = list(header) if header is not None else None
         self._formatter = formatter
         self._encoding = encoding
+        self._data_block_start_pos = 0
         self._name = name
+        self._mode = mode
 
         self._logger = logging.getLogger(f"[{self._name}DataWriter]")
 
@@ -153,6 +161,7 @@ class ExperimentDataWriter:
         if self._header:
             self._filestream.write(",".join(self._header) + "\n")
             self._filestream.flush()
+            self._data_block_start_pos = self._filestream.tell()
         self._logger.info("Set output file to '%s'", self.filepath)
 
     def start(self) -> None:
@@ -219,6 +228,9 @@ class ExperimentDataWriter:
         self._logger.debug("Writer loop running")
         while self._running:
             if self._queue.qsize() >= self._block_size:
+                if self._mode == self.WriterMode.SNAPSHOT:
+                    # Return to the beginning of the file to overwrite previous data in snapshot mode
+                    self._filestream.seek(self._data_block_start_pos)
                 for _ in range(self._block_size):
                     item = self._queue.get(timeout=self.WAIT_BLOCK_TIMEOUT)
                     line = self._format_item(item)
@@ -230,6 +242,14 @@ class ExperimentDataWriter:
                     self._block_size,
                     self._data_cnt,
                 )
+                if self._mode == self.WriterMode.SNAPSHOT:
+                    # In snapshot mode, clear any remaining items in the queue to avoid backlog
+                    with self._lock:
+                        while not self._queue.empty():
+                            try:
+                                self._queue.get_nowait()
+                            except Exception:
+                                break
             else:
                 time.sleep(self.WAIT_BLOCK_TIMEOUT)
 

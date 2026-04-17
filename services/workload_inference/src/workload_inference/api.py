@@ -1,8 +1,10 @@
 import logging
+import threading
+from typing import Any
 
 import requests
 
-from workload_inference.data_structures import ExperimentStatus
+from workload_inference.experiments.data_structures import ExperimentStatus
 
 API_TIMEOUT = 0.1  # seconds
 
@@ -51,3 +53,32 @@ class ExperimentAPI:
             response.raise_for_status()
         except Exception as e:
             raise ExperimentAPIError(f"Error triggering next state: {e}") from e
+
+    def send_to(self, endpoint: str, data: Any) -> None:
+        """Sends data to a specified API endpoint on a background thread.
+
+        Launches a daemon thread to avoid blocking the caller.
+
+        Args:
+            endpoint: The API endpoint path starting from /api/ (e.g., "cwl/level").
+            data: The data to send as JSON.
+        """
+        thread = threading.Thread(
+            target=self._send_to_blocking,
+            args=(endpoint, data),
+            daemon=True,
+        )
+        thread.start()
+
+    def _send_to_blocking(self, endpoint: str, data: Any) -> None:
+        """Internal method that performs the actual HTTP POST request."""
+        try:
+            response = requests.post(
+                f"{self.endpoint}:{self.port}/api/{endpoint}",
+                json=data,
+                timeout=API_TIMEOUT,
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning("Error sending data to %s: %s", endpoint, e)
