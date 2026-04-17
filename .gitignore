@@ -31,3 +31,6 @@ local/
 datasets/
 
 .claude/
+
+misc-venv
+services/miscalleneous
