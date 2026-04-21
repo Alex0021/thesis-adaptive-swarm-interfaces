@@ -1,0 +1,291 @@
+# Workload Inference — CLI Script Reference
+
+All scripts are installed as console entry points by `uv sync` (or `pip install -e .`).
+Run them from anywhere once the package is installed, or with `uv run <script>` from
+the `services/workload_inference/` directory.
+
+The default data root is `services/workload_inference/data/experiments/`.
+
+---
+
+## `workload_inference` — Live Experiment Runner
+
+Starts the real-time workload inference GUI for a running experiment.
+Connects to the drone swarm and eye tracker via shared memory / ZMQ, runs the
+cognitive workload classifier, and manages the experiment state machine.
+
+```
+workload_inference [--experiment {nback,gates}]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `--experiment` | `nback` \| `gates` | `nback` | Which experiment protocol to run. `nback` runs the N-back cognitive task; `gates` runs the gate-racing task. |
+
+**Examples**
+```bash
+workload_inference                      # N-back experiment (default)
+workload_inference --experiment gates   # Gate racing experiment
+```
+
+> **Requires** a running drone simulator and eye tracker connected via shared memory.
+
+---
+
+## `visualize_task` — Offline Replay Viewer
+
+Replays a recorded trial folder and shows a side-by-side visualisation of gaze data,
+drone positions, and (optionally) real-time workload inference computed on the fly
+from the recorded gaze stream.
+
+```
+visualize_task [trial_folder] [--model MODEL]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `trial_folder` | path (positional, optional) | `data/experiments/experiment_nback/ALH0/FlyingPractice` | Path to a trial folder containing `gaze_data.csv` and `drone_data.csv`. Can be relative (resolved against the data root) or absolute. |
+| `--model`, `-m` | path | none | Path to a trained model file. When provided, workload inference runs live during replay and the workload display widget is shown. Without it, only gaze and drone data are visualised. |
+
+**Examples**
+```bash
+visualize_task                                              # Default trial, no model
+visualize_task data/experiments/experiment_nback/TQVW/task_1/trial_2
+visualize_task data/experiments/experiment_nback/TQVW/task_1/trial_2 \
+    --model data/models/my_model.zip
+```
+
+---
+
+## `offline_inference` — Batch Workload Classifier
+
+Scans an experiment folder for trials that have `gaze_data.csv` + `nback_data.csv`,
+runs the workload classifier offline, and writes an `inference_data.csv` alongside
+each trial. This is the necessary pre-processing step before running `plot_results inference`.
+
+```
+offline_inference [--data DIR] [--model MODEL] [--config YAML] [--eye-metrics YAML]
+                  [--output DIR] [--overwrite] [--dry-run] [--log-level LEVEL]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `--data` | path | `data/experiments/` | Root folder to scan. Accepts a single trial folder, a subject folder, or a full experiment folder — all are handled recursively. |
+| `--model` | path | auto-detected from `data/models/` | Trained classifier file (`.zip` for TabNet, `.pkl`/`.joblib` for sklearn). The newest file in `data/models/` is used when omitted. |
+| `--config` | path | built-in defaults | `InferenceSettings` YAML file controlling window size, step parameters, and Schmitt filter thresholds. |
+| `--eye-metrics` | path | `data/eye_metrics.yml` | Eye metrics preprocessing config (blink detection, saccade thresholds, etc.). |
+| `--output` | path | alongside each `gaze_data.csv` | If provided, writes `inference_data.csv` files into this directory, mirroring the source folder structure instead of writing in-place. |
+| `--overwrite` | flag | false | Re-process trials that already have an `inference_data.csv`. Without this flag, already-processed trials are skipped. |
+| `--dry-run` | flag | false | Print which folders would be processed without actually running inference. Useful for checking scope. |
+| `--log-level` | `DEBUG`\|`INFO`\|`WARNING`\|`ERROR` | `WARNING` | Logging verbosity. Use `INFO` to see per-trial progress, `DEBUG` for detailed internal state. |
+
+**Examples**
+```bash
+# Process all unprocessed trials in an experiment
+offline_inference --data data/experiments/experiment_nback
+
+# Process a single subject, overwriting existing results
+offline_inference --data data/experiments/experiment_nback/TQVW --overwrite
+
+# Preview what would be processed without running anything
+offline_inference --data data/experiments/experiment_nback --dry-run
+
+# Use a specific model and show INFO-level progress
+offline_inference --data data/experiments/experiment_nback \
+    --model data/models/tabnet_v3.zip \
+    --log-level INFO
+```
+
+---
+
+## `plot_results` — Inference & Racing Analysis Plots
+
+Generates publication-quality plots from processed experiment data.
+Two modes exist: `inference` (N-back workload accuracy) and `racing` (gate racing
+trajectory and adaptation).
+
+```
+plot_results {inference,racing} [--data DIR] [--output DIR] [--show] [--cwl {0,1,2}]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `result_type` | `inference` \| `racing` | *(required)* | Which analysis to run (see modes below). |
+| `--data` | path | `data/experiments/` | Experiment folder (trial / subject / experiment mode — auto-detected). |
+| `--output` | path | `data/results/` | Directory where PNG files are saved. Created if absent. |
+| `--show` | flag | false | Open an interactive matplotlib window after saving. |
+| `--cwl` | `0` \| `1` \| `2` | none | *(inference mode only)* Overlay a trajectory coloured by CWL level for the task corresponding to this cognitive load level (0 = Low, 1 = Medium, 2 = High). Task assignment is resolved automatically per subject. |
+
+### Mode: `inference`
+
+Requires `inference_data.csv` in the target folder(s) — run `offline_inference` first.
+
+Produces:
+- **`inference_time_series.png`** — workload state over time (raw vs. filtered), ground-truth N-back level, and rolling accuracy.
+- **`inference_accuracy_summary.png`** — overall accuracy and per-class recall bars.
+- *(subject/experiment mode)* **`inference_subject_summary.png`** — per-task and per-CWL-level accuracy bars for each subject.
+- *(with `--cwl`)* **`inference_trajectory_cwlN.png`** — drone trajectory coloured by workload prediction for the chosen CWL level.
+
+### Mode: `racing`
+
+Produces:
+- **`racing_course_analysis.png`** — 3D trajectory with gate overlays, CWL over time, and raw control inputs.
+- **`racing_adaptation_performance.png`** — normalised adaptation parameters over time, split times per gate, and a performance summary.
+
+**Examples**
+```bash
+# Inference plots for a single subject
+plot_results inference --data data/experiments/experiment_nback/TQVW --show
+
+# Inference plots for all subjects in an experiment
+plot_results inference --data data/experiments/experiment_nback --output data/results/nback
+
+# Inference with CWL trajectory overlay for the High workload condition
+plot_results inference --data data/experiments/experiment_nback/TQVW --cwl 2
+
+# Racing plots for a single trial
+plot_results racing --data data/experiments/experiment_racing_dryrun/ERK0/task_0/trial_1 --show
+
+# Racing plots for a full subject
+plot_results racing --data data/experiments/experiment_racing_dryrun/ERK0
+```
+
+---
+
+## `plot_command_limits` — Flight Profile Distribution Analysis
+
+Reads all `command_data.csv` files in an experiment folder and analyses the
+distribution of adaptive flight-control limit values (max pitch, roll, yaw rate,
+speed, altitude rate, alpha) used across all subjects and trials.
+
+The limits are sampled at each **CWL step-transition** (not time-weighted), so the
+histograms reflect how often the CWL system settled at each limit level rather than
+how long it stayed there.
+
+The **recommended flight profile** is computed as the median-of-medians across
+subjects: each subject contributes one equal vote regardless of how many trials they
+completed. This profile is intended to define a fixed configuration for the **control
+group** in future experiments (no real-time CWL adaptation).
+
+```
+plot_command_limits [--data DIR] [--output DIR] [--show]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `--data` | path | `data/experiments/` | Experiment folder (trial / subject / experiment mode — auto-detected). Must contain `command_data.csv` files with limit columns (racing experiments). Legacy N-back files without limit columns are skipped automatically with a warning. |
+| `--output` | path | `data/results/` | Directory where PNG files are saved. Created if absent. |
+| `--show` | flag | false | Open an interactive matplotlib window after saving. |
+
+Produces:
+- **`command_limits_histograms.png`** — 2×3 histogram grid (one subplot per parameter). Each subject is a distinct colour; dashed lines show per-subject medians; solid black lines show the recommended value.
+- **`command_limits_summary.png`** — formatted table of per-subject medians with the recommended profile highlighted in bold.
+
+Also prints the recommended flight profile values to stdout.
+
+**Examples**
+```bash
+# Analyse all subjects in a racing experiment
+plot_command_limits --data data/experiments/experiment_racing_dryrun --show
+
+# Analyse a single subject
+plot_command_limits --data data/experiments/experiment_racing_dryrun/ERK0
+
+# Save results to a custom directory
+plot_command_limits --data data/experiments/experiment_racing_dryrun \
+    --output data/results/flight_profile
+```
+
+---
+
+## `generate_data` — Fake Data Generator (Development Only)
+
+Generates synthetic `gaze_data.csv` and `drone_data.csv` files into
+`data/experiments/test_experiment/` for testing the pipeline without real hardware.
+
+```
+generate_data [-t SECONDS]
+```
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `-t`, `--time` | int | `5` | Duration of data generation in seconds. Stop early with Ctrl+C. |
+
+**Examples**
+```bash
+generate_data           # Generate 5 seconds of test data
+generate_data -t 30     # Generate 30 seconds of test data
+```
+
+> **Note:** This is a development utility. The generated data can be replayed with
+> `visualize_task` or fed into `offline_inference` for pipeline testing.
+
+---
+
+## Typical Workflows
+
+### Run an N-back experiment and analyse results
+
+```bash
+# 1. Run the live experiment (records CSVs automatically)
+workload_inference --experiment nback
+
+# 2. Run offline inference on the recorded data
+offline_inference --data data/experiments/experiment_nback --log-level INFO
+
+# 3. Generate accuracy plots
+plot_results inference --data data/experiments/experiment_nback --show
+```
+
+### Run a gate racing experiment and analyse the flight profile
+
+```bash
+# 1. Run the live experiment
+workload_inference --experiment gates
+
+# 2. Generate racing analysis plots (no inference needed)
+plot_results racing --data data/experiments/experiment_racing_dryrun --show
+
+# 3. Analyse limit distributions to derive a recommended flight profile
+plot_command_limits --data data/experiments/experiment_racing_dryrun --show
+```
+
+### Test the pipeline without hardware
+
+```bash
+# 1. Generate synthetic sensor data
+generate_data -t 60
+
+# 2. Replay and inspect it visually
+visualize_task data/experiments/test_experiment
+```
+
+---
+
+## Data Folder Structure
+
+```
+services/workload_inference/data/
+├── experiments/
+│   ├── experiment_nback/
+│   │   └── <SUBJ>/              # 4-char subject ID (e.g. TQVW)
+│   │       ├── FlyingPractice/
+│   │       │   ├── gaze_data.csv
+│   │       │   ├── drone_data.csv
+│   │       │   └── nback_data.csv
+│   │       └── task_N/
+│   │           └── trial_M/
+│   │               ├── gaze_data.csv
+│   │               ├── drone_data.csv
+│   │               ├── nback_data.csv
+│   │               └── inference_data.csv   ← written by offline_inference
+│   └── experiment_racing_dryrun/
+│       └── <SUBJ>/
+│           └── task_N/
+│               └── trial_M/
+│                   ├── gaze_data.csv
+│                   ├── drone_data.csv
+│                   └── command_data.csv     ← contains limit columns
+├── models/                                  ← trained classifiers
+└── results/                                 ← plot outputs
+```
