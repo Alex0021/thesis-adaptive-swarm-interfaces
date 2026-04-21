@@ -397,6 +397,8 @@ class ExperimentState(Enum):
     Finished = 15
     ReadyScreen = 16
     RaceInstructions = 17
+    FlyingPracticeInstr = 18
+    Feedback = 19
 
 
 @dataclass
