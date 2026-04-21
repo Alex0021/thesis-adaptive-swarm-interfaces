@@ -345,6 +345,9 @@ class GateRacingExperimentManagerWindow(ExperimentManagerWindow):
             self._rebuild_trial_cards(n_trials)
 
         # ── Gate cards ────────────────────────────────────────────────────
+        alive_drone_count = DRONE_COUNT - manager.trial_crashed_drones.get(
+            status.current_trial, DRONE_COUNT
+        )
         prev_pass_ts: int | None = manager.trial_start_timestamp
         for i, card in enumerate(self._gate_cards):
             if i < len(manager._gate_layout):
@@ -363,7 +366,7 @@ class GateRacingExperimentManagerWindow(ExperimentManagerWindow):
             if pass_count == 0:
                 state = int(gate_status.gate_state) if gate_status else 0
                 style = _GATE_STYLES.get(state, _GATE_STYLES[0])
-            elif pass_count < DRONE_COUNT:
+            elif pass_count < alive_drone_count:
                 style = _GATE_STYLES[2]  # yellow (PartialComplete)
             else:
                 style = _GATE_STYLES[3]  # green (Completed)

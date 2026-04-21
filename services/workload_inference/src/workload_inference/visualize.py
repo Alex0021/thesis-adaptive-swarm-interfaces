@@ -592,11 +592,13 @@ class DroneDataCanvasGateRacing(FigureCanvas):
         self._gate_texts: list[Any] = []
         self._gate_statuses: dict[int, Any] = {}
         self._swarm_triangle: Any = None
+        self._dead_scatter: Any = None
         self._vel_bar_rect: Any = None
         self._alt_bar_rect: Any = None
 
         # Latest drone state — no history needed, just current values
         self._alive = np.zeros(num_drones, dtype=bool)
+        self._ever_seen = np.zeros(num_drones, dtype=bool)
         self._pos_z = np.zeros(num_drones)
         self._pos_x = np.zeros(num_drones)
         self._last_vel = np.zeros((num_drones, 3))
@@ -666,6 +668,10 @@ class DroneDataCanvasGateRacing(FigureCanvas):
         """Draw gates as colored rectangles based on their current state."""
         self._gate_rectangles.clear()
         self._gate_texts.clear()
+        # Use alive count as threshold; fall back to num_drones before data arrives
+        alive_count = (
+            int(self._alive.sum()) if self._ever_seen.any() else self.num_drones
+        )
         for gate in self.gates:
             gate_status = self._gate_statuses.get(int(gate.id))
             if gate_status is None:
@@ -674,7 +680,7 @@ class DroneDataCanvasGateRacing(FigureCanvas):
                 pass_count = int(gate_status.get("pass_count", 0))
                 if pass_count == 0:
                     state = int(gate_status.get("gate_state", 0))
-                elif pass_count < self.num_drones:
+                elif pass_count < alive_count:
                     state = 2
                 else:
                     state = 3
@@ -824,11 +830,36 @@ class DroneDataCanvasGateRacing(FigureCanvas):
         else:
             self._alt_bar_rect.set_width(alt_h - self.alt_min)
 
+        # Dead drone X markers
+        dead_mask = self._ever_seen & ~self._alive
+        if dead_mask.any():
+            offsets = np.column_stack(
+                [self._pos_z[dead_mask], self._pos_x[dead_mask]]
+            )
+            if self._dead_scatter is None:
+                self._dead_scatter = self.ax.scatter(
+                    offsets[:, 0],
+                    offsets[:, 1],
+                    s=80,
+                    c="#cc0000",
+                    marker="x",
+                    linewidths=2,
+                    zorder=6,
+                )
+                self._dead_scatter.set_animated(True)
+            else:
+                self._dead_scatter.set_offsets(offsets)
+                self._dead_scatter.set_visible(True)
+        elif self._dead_scatter is not None:
+            self._dead_scatter.set_visible(False)
+
     def _blit_update(self) -> None:
         if not self._blit_ready or self._background is None:
             self.draw_idle()
             return
         self.restore_region(self._background)
+        if self._dead_scatter is not None:
+            self.ax.draw_artist(self._dead_scatter)
         if self._swarm_triangle is not None:
             self.ax.draw_artist(self._swarm_triangle)
         if self._vel_bar_rect is not None:
@@ -876,9 +907,11 @@ class DroneDataCanvasGateRacing(FigureCanvas):
         """Store latest drone state (position, velocity, altitude, yaw)."""
         if batch_update:
             self._alive[:] = False
+            self._ever_seen[:] = False
         for drone_data in datas:
             drone_id = int(drone_data.id)
             if 0 <= drone_id < self.num_drones:
+                self._ever_seen[drone_id] = True
                 self._alive[drone_id] = bool(drone_data.alive)
                 self._pos_z[drone_id] = float(drone_data.position_z)
                 self._pos_x[drone_id] = float(drone_data.position_x)
