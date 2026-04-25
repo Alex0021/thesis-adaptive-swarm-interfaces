@@ -34,6 +34,7 @@ visualize_task = "workload_inference.visualize:main"
 generate_data = "workload_inference.test_data:main"
 plot_results = "workload_inference.plot_results:main"
 plot_command_limits = "workload_inference.plot_command_limits:main"
+plot_feedback = "workload_inference.plot_feedback:main"
 offline_inference = "workload_inference.offline_inference:main"
 
 [tool.uv.sources]
