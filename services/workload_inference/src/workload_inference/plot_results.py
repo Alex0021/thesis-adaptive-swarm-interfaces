@@ -1484,7 +1484,7 @@ def _shade_difficulty_time(ax, gates, gate_status, t0_ms):
         ax.axvspan(t0_s, t1_s, alpha=0.08, color=color, linewidth=0)
 
 
-def _shade_difficulty_z(ax, gates):
+def _shade_difficulty_z(ax, gates, alpha: float = 0.06):
     if DIFFICULTY_COL not in gates.columns:
         return
     sorted_gates = gates.sort_values("center_z")
@@ -1495,7 +1495,7 @@ def _shade_difficulty_z(ax, gates):
         ax.axvspan(
             sorted_gates.iloc[i]["center_z"],
             g_next["center_z"],
-            alpha=0.06,
+            alpha=alpha,
             color=color,
             linewidth=0,
         )
@@ -1508,32 +1508,123 @@ def _draw_gate_lines(ax, gate_status, t0_ms):
         ax.axvline(t_s, color="#aaa", linewidth=0.5, linestyle=":", alpha=0.5)
 
 
+def _draw_gate_lines_z(ax, gates):
+    for _, g in gates.sort_values("center_z").iterrows():
+        ax.axvline(g["center_z"], color="#aaa", linewidth=0.5, linestyle=":", alpha=0.5)
+
+
+def _alive_at_timestamp(drones: pd.DataFrame, ts: int) -> int:
+    """Return count of unique alive drone IDs at or just before ts."""
+    if drones is None or drones.empty:
+        return SWARM_SIZE
+    before = drones[drones["timestamp"] <= ts]
+    if before.empty:
+        return SWARM_SIZE
+    latest_ts = int(before["timestamp"].max())
+    frame = before[before["timestamp"] == latest_ts]
+    return int(frame[frame["alive"] > 0]["id"].nunique())
+
+
+def _compute_gate_breakdown(gates, gate_status, drones) -> dict:
+    """Returns mapping gate_id -> {inside, outside, dead, reached, first_pass_ts}."""
+    breakdown = {}
+    if gate_status is None:
+        for _, g in gates.iterrows():
+            breakdown[int(g["id"])] = dict(
+                inside=0, outside=0, dead=SWARM_SIZE, reached=False, first_pass_ts=0
+            )
+        return breakdown
+    for _, row in gate_status.iterrows():
+        gid = int(row["id"])
+        ts = int(row.get("first_pass_timestamp", 0))
+        pc = int(row.get("pass_count", 0))
+        reached = ts > 0
+        alive_ids = _alive_at_timestamp(drones, ts) if (reached and drones is not None) else SWARM_SIZE
+        dead = max(0, SWARM_SIZE - alive_ids)
+        outside = max(0, alive_ids - pc)
+        breakdown[gid] = dict(
+            inside=pc, outside=outside, dead=dead, reached=reached, first_pass_ts=ts
+        )
+    return breakdown
+
+
+def _time_to_z(timestamps_ms, centroid: pd.DataFrame) -> np.ndarray:
+    return np.interp(
+        np.asarray(timestamps_ms, dtype=float),
+        centroid["timestamp"].values.astype(float),
+        centroid["z"].values.astype(float),
+    )
+
+
+def _find_dead_drones(drones: pd.DataFrame) -> pd.DataFrame:
+    if drones is None or drones.empty or "alive" not in drones.columns:
+        return pd.DataFrame(columns=["id", "position_x", "position_z", "timestamp"])
+    deaths = []
+    for drone_id, grp in drones.groupby("id"):
+        grp = grp.sort_values("timestamp")
+        alive = grp["alive"].values
+        if len(alive) == 0 or alive.min() != 0 or alive.max() == 0:
+            continue
+        # First index where alive==0 after being alive
+        dead_idx = np.argmax(alive == 0)
+        if dead_idx == 0:
+            continue  # was never alive
+        last_alive = grp.iloc[dead_idx - 1]
+        deaths.append(
+            {
+                "id": int(drone_id),
+                "position_x": float(last_alive["position_x"]),
+                "position_z": float(last_alive["position_z"]),
+                "timestamp": int(last_alive["timestamp"]),
+            }
+        )
+    return pd.DataFrame(deaths)
+
+
 def _no_data_placeholder(ax, title: str):
     ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", fontsize=10)
     ax.set_title(title)
 
 
-def _plot_racing_combined(ax, gates, centroid, cwl_merged, gate_status):
+def _plot_racing_combined(
+    ax,
+    gates,
+    centroid,
+    traj_merged,
+    gate_breakdown: dict,
+    dead_drones=None,
+    traj_type: str = "inference",
+    gate_status=None,
+):
     from matplotlib.collections import LineCollection as _LC
     from matplotlib.lines import Line2D
+    from matplotlib.colors import LinearSegmentedColormap
 
-    _shade_difficulty_z(ax, gates)
+    _shade_difficulty_z(ax, gates, alpha=0.10)
 
-    # Draw gates
+    # Gate bars — colored by pass status
     for _, g in gates.iterrows():
-        is_hard = bool(g.get(DIFFICULTY_COL, 0))
-        color = "#F44336" if is_hard else "#4CAF50"
+        gid = int(g["id"])
         half_w = g["width"] / 2
+        bd = gate_breakdown.get(gid, {})
+        reached = bd.get("reached", False)
+        outside = bd.get("outside", 0)
+        if not reached:
+            bar_color = "#BDBDBD"  # gray = unreached
+        elif outside > 0:
+            bar_color = "#FFC107"  # yellow = some outside
+        else:
+            bar_color = "#4CAF50"  # green = all inside
         ax.plot(
             [g["center_z"], g["center_z"]],
             [g["center_x"] - half_w, g["center_x"] + half_w],
-            color=color,
+            color=bar_color,
             linewidth=2.5,
-            alpha=0.7,
+            alpha=0.85,
             solid_capstyle="round",
         )
 
-    # Gate labels with pass info
+    # Split times
     split_map = {}
     if gate_status is not None:
         passed = _gate_passage_times(gate_status)
@@ -1542,18 +1633,13 @@ def _plot_racing_combined(ax, gates, centroid, cwl_merged, gate_status):
             if i > 0:
                 split_map[int(row["id"])] = (ts_list[i] - ts_list[i - 1]) / 1000.0
 
+    # Gate labels
     for _, g in gates.iterrows():
         gid = int(g["id"])
         half_w = g["width"] / 2
         label_parts = [f"G{gid}"]
         if gid in split_map:
             label_parts.append(f"{split_map[gid]:.1f}s")
-        if gate_status is not None:
-            gs_row = gate_status[gate_status["id"] == gid]
-            if not gs_row.empty:
-                pc = int(gs_row.iloc[0]["pass_count"])
-                if 0 < pc < SWARM_SIZE:
-                    label_parts.append(f"({pc}/{SWARM_SIZE})")
 
         ax.text(
             g["center_z"],
@@ -1566,92 +1652,258 @@ def _plot_racing_combined(ax, gates, centroid, cwl_merged, gate_status):
             fontweight="bold" if gid in split_map else "normal",
         )
 
-    # Trajectory colored by CWL as a smooth gradient line
-    if cwl_merged is not None and not cwl_merged.empty:
-        z_vals = cwl_merged["z"].values
-        x_vals = cwl_merged["x"].values
-        states = cwl_merged["filtered_state"].values.astype(int)
+        bd = gate_breakdown.get(gid, {})
+        outside = bd.get("outside", 0)
+        if outside > 0 and bd.get("reached", False):
+            ax.text(
+                g["center_z"],
+                g["center_x"] - half_w - 2,
+                f"⚠{outside}",
+                fontsize=7,
+                ha="center",
+                va="top",
+                color="#E65100",
+                fontweight="bold",
+            )
+
+    # Completion time annotation on end marker
+    completion_str = None
+    if gate_status is not None:
+        passed_gates = _gate_passage_times(gate_status)
+        if len(passed_gates) >= 2:
+            t_start = passed_gates["first_pass_timestamp"].min()
+            t_end = passed_gates["first_pass_timestamp"].max()
+            elapsed_s = (t_end - t_start) / 1000.0
+            mm = int(elapsed_s // 60)
+            ss = elapsed_s % 60
+            completion_str = f"{mm:02d}:{ss:04.1f}"
+
+    # Trajectory
+    if traj_merged is not None and not traj_merged.empty:
+        z_vals = traj_merged["z"].values
+        x_vals = traj_merged["x"].values
+
+        if traj_type == "adaptive" and "cwl_current_step" in traj_merged.columns:
+            total = traj_merged["cwl_total_steps"].replace(0, np.nan).fillna(24)
+            step_norm = (traj_merged["cwl_current_step"] / total).clip(0, 1).values
+            cmap = LinearSegmentedColormap.from_list(
+                "adaptive", ["#F44336", "#FFC107", "#4CAF50"]
+            )
+            seg_colors = [cmap(float((step_norm[i] + step_norm[i + 1]) / 2)) for i in range(len(step_norm) - 1)]
+        else:
+            states = traj_merged["filtered_state"].values.astype(int)
+            seg_colors = [STATE_COLORS.get(s, "#999") for s in states[:-1]]
 
         points = np.column_stack([z_vals, x_vals]).reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
-        colors = [STATE_COLORS.get(s, "#999") for s in states[:-1]]
-
-        lc = _LC(segments, colors=colors, linewidths=3, alpha=0.85, zorder=2)
+        lc = _LC(segments, colors=seg_colors, linewidths=3, alpha=0.85, zorder=2)
         ax.add_collection(lc)
 
-        # Start / end markers
-        ax.scatter(
-            z_vals[0],
-            x_vals[0],
-            marker="o",
-            s=80,
-            color="#333",
-            zorder=5,
-            edgecolors="white",
-            linewidths=1.5,
-        )
-        ax.scatter(
-            z_vals[-1],
-            x_vals[-1],
-            marker="s",
-            s=80,
-            color="#333",
-            zorder=5,
-            edgecolors="white",
-            linewidths=1.5,
-        )
+        ax.scatter(z_vals[0], x_vals[0], marker="o", s=80, color="#333", zorder=5, edgecolors="white", linewidths=1.5)
+        ax.scatter(z_vals[-1], x_vals[-1], marker="s", s=80, color="#333", zorder=5, edgecolors="white", linewidths=1.5)
+
+        if completion_str:
+            ax.annotate(
+                f"Finish\n{completion_str}",
+                xy=(z_vals[-1], x_vals[-1]),
+                xytext=(6, -14),
+                textcoords="offset points",
+                fontsize=7,
+                color="#333",
+                fontweight="bold",
+            )
     elif centroid is not None:
-        ax.plot(
-            centroid["z"],
-            centroid["x"],
-            color="#555",
-            linewidth=2,
-            alpha=0.7,
-            zorder=2,
-        )
+        ax.plot(centroid["z"], centroid["x"], color="#555", linewidth=2, alpha=0.7, zorder=2)
+
+    # Dead drone markers
+    has_dead = dead_drones is not None and not dead_drones.empty
+    if has_dead:
+        for _, row in dead_drones.iterrows():
+            ax.scatter(row["position_z"], row["position_x"], marker="x", color="#222", s=140, linewidths=2.8, zorder=6)
+            ax.annotate(
+                f"D{int(row['id'])}",
+                xy=(row["position_z"], row["position_x"]),
+                xytext=(4, 6),
+                textcoords="offset points",
+                fontsize=7,
+                color="#222",
+                fontweight="bold",
+                zorder=7,
+            )
 
     # Legend
-    handles = [
-        Line2D([0], [0], color=STATE_COLORS[i], linewidth=3, label=STATE_LABELS[i])
-        for i in range(3)
-    ]
-    if DIFFICULTY_COL in gates.columns:
-        handles += [
-            Line2D(
-                [0], [0], color="#4CAF50", linewidth=2.5, alpha=0.7, label="Easy gate"
-            ),
-            Line2D(
-                [0], [0], color="#F44336", linewidth=2.5, alpha=0.7, label="Hard gate"
-            ),
+    if traj_type == "adaptive":
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize, LinearSegmentedColormap as _LSC
+        cmap = _LSC.from_list("adaptive", ["#F44336", "#FFC107", "#4CAF50"])
+        sm = ScalarMappable(cmap=cmap, norm=Normalize(vmin=0, vmax=1))
+        sm.set_array([])
+        plt.colorbar(sm, ax=ax, location="right", fraction=0.02, pad=0.02,
+                     label="Adaptation (Soft → Racing)")
+        handles = []
+    else:
+        handles = [
+            Line2D([0], [0], color=STATE_COLORS[i], linewidth=3, label=STATE_LABELS[i])
+            for i in range(3)
         ]
     handles += [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="#333",
-            linewidth=0,
-            markersize=7,
-            markeredgecolor="white",
-            label="Start",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="s",
-            color="#333",
-            linewidth=0,
-            markersize=7,
-            markeredgecolor="white",
-            label="End",
-        ),
+        Line2D([0], [0], color="#4CAF50", linewidth=2.5, alpha=0.85, label="All inside"),
+        Line2D([0], [0], color="#FFC107", linewidth=2.5, alpha=0.85, label="Some outside"),
+        Line2D([0], [0], color="#BDBDBD", linewidth=2.5, alpha=0.85, label="Unreached gate"),
+        Line2D([0], [0], marker="o", color="#333", linewidth=0, markersize=7, markeredgecolor="white", label="Start"),
+        Line2D([0], [0], marker="s", color="#333", linewidth=0, markersize=7, markeredgecolor="white", label="End"),
     ]
-    ax.legend(handles=handles, loc="upper right", fontsize=8)
+    if has_dead:
+        handles.append(
+            Line2D([0], [0], marker="x", color="#222", linewidth=0, markersize=9, markeredgewidth=2.5, label="Dead drone")
+        )
+    ax.legend(handles=handles, loc="upper right", fontsize=8, ncol=2)
 
-    ax.set_xlabel("Z — Course Progress (m)")
     ax.set_ylabel("X — Lateral (m)")
-    ax.set_title("Course Overview — Trajectory colored by CWL, split times at gates")
+    title_type = "Adaptation Step" if traj_type == "adaptive" else "CWL"
+    ax.set_title(f"Course Overview — Trajectory colored by {title_type}, split times at gates")
     ax.grid(alpha=0.2)
+
+
+def _plot_racing_cwl_probability(ax, inference, centroid, gates):
+    if (
+        inference is None
+        or len(inference) <= 1
+        or centroid is None
+        or centroid.empty
+    ):
+        _no_data_placeholder(ax, "CWL Probabilities")
+        return
+
+    inf = inference[inference["timestamp"] > 0].copy()
+    required = {"prob_low", "prob_medium", "prob_high"}
+    if inf.empty or not required.issubset(inf.columns):
+        _no_data_placeholder(ax, "CWL Probabilities")
+        return
+
+    inf = inf.sort_values("timestamp")
+    z_raw = _time_to_z(inf["timestamp"].values, centroid)
+
+    # Resample to uniform Z grid to avoid temporal-density distortion
+    z_grid = np.linspace(z_raw.min(), z_raw.max(), 500)
+    prob_low = np.interp(z_grid, z_raw, inf["prob_low"].values)
+    prob_med = np.interp(z_grid, z_raw, inf["prob_medium"].values)
+    prob_high = np.interp(z_grid, z_raw, inf["prob_high"].values)
+
+    _shade_difficulty_z(ax, gates)
+    ax.stackplot(
+        z_grid,
+        prob_low,
+        prob_med,
+        prob_high,
+        colors=[STATE_COLORS[0], STATE_COLORS[1], STATE_COLORS[2]],
+        alpha=0.85,
+        labels=[STATE_LABELS[0], STATE_LABELS[1], STATE_LABELS[2]],
+    )
+    _draw_gate_lines_z(ax, gates)
+    ax.set_ylim(0, 1.02)
+    ax.set_ylabel("CWL Probability")
+    ax.legend(loc="upper right", fontsize=7, ncol=3)
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+
+
+def _plot_racing_adaptation_z(ax, commands, centroid, gates):
+    if commands is None or centroid is None or centroid.empty:
+        _no_data_placeholder(ax, "Adaptation Profile")
+        return
+
+    cmd = commands[commands["timestamp"] > 0].copy()
+    if (
+        cmd.empty
+        or "cwl_current_step" not in cmd.columns
+        or "cwl_total_steps" not in cmd.columns
+    ):
+        _no_data_placeholder(ax, "Adaptation Profile")
+        return
+
+    cmd = cmd.sort_values("timestamp")
+    total = cmd["cwl_total_steps"].replace(0, np.nan)
+    step_norm_raw = (cmd["cwl_current_step"] / total).fillna(0).clip(0, 1).values
+    z_raw = _time_to_z(cmd["timestamp"].values, centroid)
+
+    # Resample to uniform Z grid
+    z_grid = np.linspace(z_raw.min(), z_raw.max(), 500)
+    step_norm = np.interp(z_grid, z_raw, step_norm_raw)
+
+    _shade_difficulty_z(ax, gates)
+    ax.fill_between(z_grid, 0, step_norm, alpha=0.25, color="#5C6BC0", zorder=2)
+    ax.plot(z_grid, step_norm, color="#3949AB", linewidth=1.8, zorder=3)
+
+    _draw_gate_lines_z(ax, gates)
+    ax.set_ylim(-0.05, 1.10)
+    ax.set_yticks([0.0, 1.0])
+    ax.set_yticklabels(["Soft", "Racing"])
+    ax.set_ylabel("Profile")
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+
+
+def _plot_racing_drone_misses(ax, gates, gate_breakdown: dict):
+    if gates is None or gates.empty:
+        _no_data_placeholder(ax, "Drones Through Gate")
+        return
+
+    sorted_gates = gates.sort_values("center_z").reset_index(drop=True)
+    z_centers = sorted_gates["center_z"].values
+
+    mean_span = float(np.mean(np.diff(z_centers))) if len(z_centers) >= 2 else 1.0
+    bar_width = 0.6 * mean_span if mean_span > 0 else 1.0
+
+    _shade_difficulty_z(ax, gates)
+
+    legend_labels: set[str] = set()
+
+    for _, g in sorted_gates.iterrows():
+        gid = int(g["id"])
+        z = float(g["center_z"])
+        bd = gate_breakdown.get(gid, {})
+        reached = bd.get("reached", False)
+
+        if not reached:
+            ax.bar(
+                z, SWARM_SIZE, width=bar_width * 0.25,
+                color="#9E9E9E", alpha=0.25, edgecolor="none", zorder=2,
+                label="Unreached" if "Unreached" not in legend_labels else None,
+            )
+            legend_labels.add("Unreached")
+            continue
+
+        inside = bd.get("inside", 0)
+        outside = bd.get("outside", 0)
+        dead = bd.get("dead", 0)
+        bottom = 0
+
+        if inside > 0:
+            ax.bar(z, inside, width=bar_width, bottom=bottom, color="#4CAF50",
+                   edgecolor="white", linewidth=0.4, zorder=3,
+                   label="Inside" if "Inside" not in legend_labels else None)
+            legend_labels.add("Inside")
+            bottom += inside
+
+        if outside > 0:
+            ax.bar(z, outside, width=bar_width, bottom=bottom, color="#FFC107",
+                   edgecolor="white", linewidth=0.4, zorder=3,
+                   label="Outside" if "Outside" not in legend_labels else None)
+            legend_labels.add("Outside")
+            bottom += outside
+
+        if dead > 0:
+            ax.bar(z, dead, width=bar_width, bottom=bottom, color="#212121",
+                   edgecolor="white", linewidth=0.4, zorder=3,
+                   label="Dead" if "Dead" not in legend_labels else None)
+            legend_labels.add("Dead")
+
+    _draw_gate_lines_z(ax, gates)
+    ax.set_ylim(0, SWARM_SIZE + 0.5)
+    ax.set_yticks([0, 3, 6, 9])
+    ax.set_ylabel(f"Drones (/{SWARM_SIZE})")
+    ax.set_xlabel("Course Progress Z (m)")
+    ax.legend(loc="upper right", fontsize=7, ncol=4)
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
 
 
 def _plot_racing_cwl(ax, inference, gates, gate_status, t0_ms):
@@ -1858,7 +2110,7 @@ def _plot_racing_stats(ax, gates, gate_status, drones, centroid):
     ax.set_title("Performance Summary", fontsize=11, fontweight="bold")
 
 
-def run_racing(show: bool, output_dir: Path, data_dir: Path, **_kw):
+def run_racing(show: bool, output_dir: Path, data_dir: Path, traj_type: str = "inference", **_kw):
     print(f"Loading racing trial data from: {data_dir}")
 
     gates = _load_csv(data_dir, GATE_LAYOUT_FILE)
@@ -1875,39 +2127,59 @@ def run_racing(show: bool, output_dir: Path, data_dir: Path, **_kw):
 
     centroid = _compute_centroid(drones) if drones is not None else None
 
-    cwl_merged = None
-    if centroid is not None and inference is not None and len(inference) > 1:
-        inf_cols = inference[["timestamp", "filtered_state", "raw_state"]]
-        cwl_merged = pd.merge_asof(
-            centroid.sort_values("timestamp"),
-            inf_cols.sort_values("timestamp"),
-            on="timestamp",
-            direction="backward",
-        ).dropna(subset=["filtered_state"])
+    # Build trajectory merged dataset (inference or adaptive coloring)
+    traj_merged = None
+    if centroid is not None:
+        if traj_type == "adaptive" and commands is not None:
+            cmd_cols = commands[
+                ["timestamp", "cwl_current_step", "cwl_total_steps"]
+            ].sort_values("timestamp")
+            traj_merged = pd.merge_asof(
+                centroid.sort_values("timestamp"),
+                cmd_cols,
+                on="timestamp",
+                direction="backward",
+            ).dropna(subset=["cwl_current_step"])
+        elif inference is not None and len(inference) > 1:
+            inf_cols = inference[["timestamp", "filtered_state", "raw_state"]].sort_values("timestamp")
+            traj_merged = pd.merge_asof(
+                centroid.sort_values("timestamp"),
+                inf_cols,
+                on="timestamp",
+                direction="backward",
+            ).dropna(subset=["filtered_state"])
 
+    gate_breakdown = _compute_gate_breakdown(gates, gate_status, drones)
+    dead_drones = _find_dead_drones(drones) if drones is not None else pd.DataFrame()
     t0_ms = _find_t0(inference, centroid, commands, gate_status)
     figs: list[tuple[plt.Figure, Path]] = []
 
     # ── Figure 1: Course Analysis ──
-    fig1 = plt.figure(figsize=(18, 14))
+    fig1 = plt.figure(figsize=(18, 16))
     gs1 = fig1.add_gridspec(
-        3,
+        4,
         1,
-        height_ratios=[3, 1, 1.2],
-        hspace=0.2,
+        height_ratios=[3, 1.8, 1.2, 1.2],
+        hspace=0.10,
     )
     fig1.suptitle("Racing Trial — Course Analysis", fontsize=14, fontweight="bold")
 
     ax_traj = fig1.add_subplot(gs1[0])
-    ax_cwl = fig1.add_subplot(gs1[1])
-    ax_cmd = fig1.add_subplot(gs1[2], sharex=ax_cwl)
+    ax_prob = fig1.add_subplot(gs1[1], sharex=ax_traj)
+    ax_step = fig1.add_subplot(gs1[2], sharex=ax_traj)
+    ax_miss = fig1.add_subplot(gs1[3], sharex=ax_traj)
 
-    _plot_racing_combined(ax_traj, gates, centroid, cwl_merged, gate_status)
-    _plot_racing_cwl(ax_cwl, inference, gates, gate_status, t0_ms)
-    _plot_racing_commands(ax_cmd, commands, gate_status, t0_ms)
+    _plot_racing_combined(
+        ax_traj, gates, centroid, traj_merged, gate_breakdown,
+        dead_drones=dead_drones, traj_type=traj_type, gate_status=gate_status,
+    )
+    _plot_racing_cwl_probability(ax_prob, inference, centroid, gates)
+    _plot_racing_adaptation_z(ax_step, commands, centroid, gates)
+    _plot_racing_drone_misses(ax_miss, gates, gate_breakdown)
 
-    ax_cwl.set_xlabel("")
-    plt.setp(ax_cwl.get_xticklabels(), visible=False)
+    for ax in (ax_traj, ax_prob, ax_step):
+        plt.setp(ax.get_xticklabels(), visible=False)
+        ax.set_xlabel("")
 
     fig1.tight_layout()
     figs.append((fig1, output_dir / "racing_course_analysis.png"))
@@ -1956,10 +2228,20 @@ def main():
         help="CWL level to visualize as a trajectory plot: 0=Low, 1=Medium, "
         "2=High.  The corresponding task is resolved automatically per subject.",
     )
+    parser.add_argument(
+        "--type",
+        dest="traj_type",
+        default="inference",
+        choices=["inference", "adaptive"],
+        help="Trajectory colormap for racing plot: 'inference' colors by CWL state "
+        "(green/orange/red), 'adaptive' colors by adaptation step "
+        "(red=Soft/0 → green=Racing/max).",
+    )
 
     args = parser.parse_args()
     RESULT_TYPES[args.result_type](
-        show=args.show, output_dir=args.output, data_dir=args.data, cwl=args.cwl
+        show=args.show, output_dir=args.output, data_dir=args.data,
+        cwl=args.cwl, traj_type=args.traj_type,
     )
 
 
