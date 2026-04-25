@@ -152,48 +152,44 @@ plot_results racing --data data/experiments/experiment_racing_dryrun/ERK0
 
 ---
 
-## `plot_command_limits` — Flight Profile Distribution Analysis
+## `plot_command_limits` — CWL Step Statistics & Flight Profile Definition
 
-Reads all `command_data.csv` files in an experiment folder and analyses the
-distribution of adaptive flight-control limit values (max pitch, roll, yaw rate,
-speed, altitude rate, alpha) used across all subjects and trials.
+Reads all `command_data.csv` files in an experiment folder and computes **global
+and per-subject statistics** on the CWL step number (`cwl_current_step`) used
+throughout the experiments.
 
-The limits are sampled at each **CWL step-transition** (not time-weighted), so the
-histograms reflect how often the CWL system settled at each limit level rather than
-how long it stayed there.
-
-The **recommended flight profile** is computed as the median-of-medians across
-subjects: each subject contributes one equal vote regardless of how many trials they
-completed. This profile is intended to define a fixed configuration for the **control
-group** in future experiments (no real-time CWL adaptation).
+The intended workflow is:
+1. Run this script to see the average and median step numbers achieved by subjects.
+2. Decide which value (mean or median) represents the "ideal" step for your
+   control-group profile.
+3. Manually compute the corresponding limit values using your system's step-to-limit
+   mapping.
+4. Update the `FLIGHT_PROFILE_LIMITS` dict at the top of the script with those
+   values.
+5. Use those constants in future control-group experiments (no real-time CWL
+   adaptation).
 
 ```
-plot_command_limits [--data DIR] [--output DIR] [--show]
+plot_command_limits [--data DIR]
 ```
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `--data` | path | `data/experiments/` | Experiment folder (trial / subject / experiment mode — auto-detected). Must contain `command_data.csv` files with limit columns (racing experiments). Legacy N-back files without limit columns are skipped automatically with a warning. |
-| `--output` | path | `data/results/` | Directory where PNG files are saved. Created if absent. |
-| `--show` | flag | false | Open an interactive matplotlib window after saving. |
+| `--data` | path | `data/experiments/` | Experiment folder (trial / subject / experiment mode — auto-detected). Must contain `command_data.csv` files with `cwl_current_step` and `cwl_total_steps` columns. |
 
-Produces:
-- **`command_limits_histograms.png`** — 2×3 histogram grid (one subplot per parameter). Each subject is a distinct colour; dashed lines show per-subject medians; solid black lines show the recommended value.
-- **`command_limits_summary.png`** — formatted table of per-subject medians with the recommended profile highlighted in bold.
-
-Also prints the recommended flight profile values to stdout.
+Prints to stdout:
+- Global statistics: mean step, median step, min/max observed, total steps.
+- Per-subject statistics: mean/median/range, number of data rows, number of trials.
+- Instructions for manually defining the flight profile limits.
+- (If defined) the current `FLIGHT_PROFILE_LIMITS` constants.
 
 **Examples**
 ```bash
 # Analyse all subjects in a racing experiment
-plot_command_limits --data data/experiments/experiment_racing_dryrun --show
+plot_command_limits --data data/experiments/experiment_racing_dryrun
 
 # Analyse a single subject
 plot_command_limits --data data/experiments/experiment_racing_dryrun/ERK0
-
-# Save results to a custom directory
-plot_command_limits --data data/experiments/experiment_racing_dryrun \
-    --output data/results/flight_profile
 ```
 
 ---
