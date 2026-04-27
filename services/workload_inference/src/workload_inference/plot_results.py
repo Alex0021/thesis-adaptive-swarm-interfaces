@@ -1389,6 +1389,23 @@ GATE_STATUS_FILE = "gate_status.csv"
 COMMAND_DATA_FILE = "command_data.csv"
 SWARM_SIZE = 9
 
+# Penalty weights for the composite trial-performance score (s-equivalent).
+# Tune these to weight crash/miss severity vs lap time.
+RACING_DEAD_PENALTY_S = 30.0
+RACING_MISS_PENALTY_S = 5.0
+
+# Adaptation-group visualisation
+GROUP_COLORS = {
+    "adaptive": "#1976D2",
+    "non_adaptive": "#FB8C00",
+    "unknown": "#9E9E9E",
+}
+GROUP_LABELS = {
+    "adaptive": "Adaptive",
+    "non_adaptive": "Non-Adaptive (Control)",
+    "unknown": "Unknown",
+}
+
 COMMAND_INPUTS = {
     "pitch_rate": ("#1976D2", "Pitch"),
     "yaw_rate": ("#E91E63", "Yaw"),
@@ -1408,6 +1425,32 @@ ADAPTATION_PARAMS = {
 }
 
 DIFFICULTY_COL = "is_hard"
+
+# Flight profile limits (mirrors plot_command_limits.py constants)
+_FLIGHT_PROFILE_LIMITS: dict[str, float] = {
+    "max_pitch": 0.45,
+    "max_roll": 0.45,
+    "max_yaw_rate": 1.5,
+    "max_speed": 15.0,
+    "max_altitude_rate": 5.0,
+    "max_alpha": 12.0,
+}
+_FLIGHT_PROFILE_MIN_LIMITS: dict[str, float] = {
+    "max_pitch": 0.2,
+    "max_roll": 0.2,
+    "max_yaw_rate": 0.6,
+    "max_speed": 3.0,
+    "max_altitude_rate": 1.5,
+    "max_alpha": 5.0,
+}
+_FLIGHT_PARAM_LABELS: dict[str, tuple[str, str]] = {
+    "max_pitch": ("Max Pitch", "rad"),
+    "max_roll": ("Max Roll", "rad"),
+    "max_yaw_rate": ("Max Yaw Rate", "rad/s"),
+    "max_speed": ("Max Speed", "m/s"),
+    "max_altitude_rate": ("Max Altitude Rate", "m/s"),
+    "max_alpha": ("Max Alpha", "°"),
+}
 
 
 def _load_csv(trial_dir: Path, filename: str) -> pd.DataFrame | None:
@@ -1977,6 +2020,70 @@ def _plot_racing_commands(ax, commands, gate_status, t0_ms):
         _draw_gate_lines(ax, gate_status, t0_ms)
 
 
+def _plot_racing_command_limits(axes, commands, gate_status, t0_ms):
+    """2×3 small-multiple panels: per-parameter flight profile limit over time.
+
+    For each parameter the theoretical limit is linearly interpolated between
+    FLIGHT_PROFILE_MIN_LIMITS (step 0) and FLIGHT_PROFILE_LIMITS (step N-1)
+    using cwl_current_step from command_data.csv.
+
+    Three filled bands make the operating envelope immediately readable:
+      • green  — always-on minimum base
+      • blue   — range unlocked by the current CWL step
+      • red    — remaining locked headroom
+    """
+    params = list(_FLIGHT_PROFILE_LIMITS.keys())
+    flat_axes = [ax for row in axes for ax in row]
+
+    no_data = commands is None
+    if not no_data:
+        cmd = commands[commands["timestamp"] > 0].copy()
+        no_data = (
+            cmd.empty
+            or "cwl_current_step" not in cmd.columns
+            or "cwl_total_steps" not in cmd.columns
+        )
+
+    if no_data:
+        for ax, param in zip(flat_axes, params):
+            _no_data_placeholder(ax, _FLIGHT_PARAM_LABELS.get(param, (param, ""))[0])
+        return
+
+    cmd = cmd.sort_values("timestamp")
+    t = (cmd["timestamp"] - t0_ms) / 1000.0
+    steps = cmd["cwl_current_step"].values
+    totals = cmd["cwl_total_steps"].replace(0, np.nan).fillna(24).values
+    ratio = np.clip(steps / np.maximum(totals - 1, 1), 0.0, 1.0)
+
+    for ax, param in zip(flat_axes, params):
+        vmin = _FLIGHT_PROFILE_MIN_LIMITS.get(param, 0.0)
+        vmax = _FLIGHT_PROFILE_LIMITS[param]
+        label, unit = _FLIGHT_PARAM_LABELS.get(param, (param, ""))
+        limit_vals = vmin + (vmax - vmin) * ratio
+
+        ax.fill_between(t, 0, vmin, alpha=0.18, color="#4CAF50", linewidth=0)
+        ax.fill_between(t, vmin, limit_vals, alpha=0.32, color="#3949AB", linewidth=0)
+        ax.fill_between(t, limit_vals, vmax, alpha=0.10, color="#F44336", linewidth=0)
+        ax.plot(t, limit_vals, color="#3949AB", linewidth=1.5, label="Current limit")
+        ax.axhline(
+            vmin, color="#4CAF50", linewidth=1.0, linestyle="--", alpha=0.9,
+            label=f"Min ({vmin})",
+        )
+        ax.axhline(
+            vmax, color="#F44336", linewidth=1.0, linestyle="--", alpha=0.9,
+            label=f"Max ({vmax})",
+        )
+
+        ax.set_title(label, fontsize=9, fontweight="bold")
+        ax.set_ylabel(unit, fontsize=8)
+        ax.set_ylim(min(0, vmin * 0.9), vmax * 1.08)
+        ax.legend(fontsize=7, loc="upper left", handlelength=1.2)
+        ax.grid(linestyle=":", alpha=0.3)
+
+        if gate_status is not None:
+            _draw_gate_lines(ax, gate_status, t0_ms)
+
+
 def _plot_racing_adaptation(ax, commands, inference, t0_ms):
     if commands is None:
         _no_data_placeholder(ax, "Adaptation Parameters")
@@ -2077,7 +2184,9 @@ def _plot_racing_stats(ax, gates, gate_status, drones, centroid):
                 passed["first_pass_timestamp"].max()
                 - passed["first_pass_timestamp"].min()
             ) / 1000.0
-            lines.append(f"Elapsed time (first→last gate):  {total_s:.1f} s")
+            mm = int(total_s // 60)
+            ss = total_s % 60
+            lines.append(f"Completion time (first→last gate):  {mm}m {ss:.1f}s")
 
         n_passed = int((gate_status["pass_count"] > 0).sum())
         n_full = int((gate_status["pass_count"] >= SWARM_SIZE).sum())
@@ -2110,8 +2219,28 @@ def _plot_racing_stats(ax, gates, gate_status, drones, centroid):
     ax.set_title("Performance Summary", fontsize=11, fontweight="bold")
 
 
+def _detect_racing_mode(data_dir: Path) -> str:
+    """Return 'trial', 'subject', or 'experiment' for racing data."""
+    if (data_dir / GATE_LAYOUT_FILE).exists():
+        return "trial"
+    if _SUBJECT_RE.match(data_dir.name):
+        return "subject"
+    return "experiment"
+
+
 def run_racing(show: bool, output_dir: Path, data_dir: Path, traj_type: str = "inference", **_kw):
-    print(f"Loading racing trial data from: {data_dir}")
+    racing_mode = _detect_racing_mode(data_dir)
+    print(f"Loading racing data from: {data_dir}  [{racing_mode} mode]")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if racing_mode == "experiment":
+        _run_racing_experiment(show, output_dir, data_dir)
+    elif racing_mode == "subject":
+        _run_racing_subject(show, output_dir, data_dir)
+    else:
+        _run_racing_trial(show, output_dir, data_dir, traj_type)
+
+
+def _run_racing_trial(show: bool, output_dir: Path, data_dir: Path, traj_type: str = "inference"):
 
     gates = _load_csv(data_dir, GATE_LAYOUT_FILE)
     gate_status = _load_csv(data_dir, GATE_STATUS_FILE)
@@ -2122,8 +2251,6 @@ def run_racing(show: bool, output_dir: Path, data_dir: Path, traj_type: str = "i
     if gates is None:
         print("  ERROR: gate_layout.csv not found")
         return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     centroid = _compute_centroid(drones) if drones is not None else None
 
@@ -2184,21 +2311,830 @@ def run_racing(show: bool, output_dir: Path, data_dir: Path, traj_type: str = "i
     fig1.tight_layout()
     figs.append((fig1, output_dir / "racing_course_analysis.png"))
 
-    # ── Figure 2: Adaptation & Performance ──
-    fig2 = plt.figure(figsize=(16, 10))
-    gs = fig2.add_gridspec(2, 2, height_ratios=[2, 1], hspace=0.3, wspace=0.3)
+    # ── Figure 2: Control Limits & Performance ──
+    fig2 = plt.figure(figsize=(16, 13))
     fig2.suptitle(
-        "Racing Trial — Adaptation & Performance", fontsize=14, fontweight="bold"
+        "Racing Trial — Control Limits & Performance", fontsize=14, fontweight="bold"
     )
-    ax_adapt = fig2.add_subplot(gs[0, :])
-    ax_splits = fig2.add_subplot(gs[1, 0])
-    ax_stats = fig2.add_subplot(gs[1, 1])
+    outer_gs = fig2.add_gridspec(2, 1, height_ratios=[2.5, 1], hspace=0.45)
+    limits_gs = outer_gs[0].subgridspec(2, 3, hspace=0.55, wspace=0.38)
+    bottom_gs = outer_gs[1].subgridspec(1, 2, wspace=0.35)
 
-    _plot_racing_adaptation(ax_adapt, commands, inference, t0_ms)
+    # Build 2×3 limit axes — share x-axis within each column
+    axes_limits = []
+    for r in range(2):
+        row = []
+        for c in range(3):
+            if r == 0:
+                ax = fig2.add_subplot(limits_gs[r, c])
+            else:
+                ax = fig2.add_subplot(limits_gs[r, c], sharex=axes_limits[0][c])
+            row.append(ax)
+        axes_limits.append(row)
+    for ax in axes_limits[0]:
+        plt.setp(ax.get_xticklabels(), visible=False)
+        ax.set_xlabel("")
+    for ax in axes_limits[1]:
+        ax.set_xlabel("Time (s)", fontsize=8)
+
+    ax_splits = fig2.add_subplot(bottom_gs[0])
+    ax_stats = fig2.add_subplot(bottom_gs[1])
+
+    _plot_racing_command_limits(axes_limits, commands, gate_status, t0_ms)
     _plot_racing_splits(ax_splits, gates, gate_status)
     _plot_racing_stats(ax_stats, gates, gate_status, drones, centroid)
     fig2.tight_layout()
     figs.append((fig2, output_dir / "racing_adaptation_performance.png"))
+
+    _save_or_show(figs, show)
+
+
+# ── Per-subject racing analysis ──────────────────────────────────────────────
+
+
+def _load_racing_trials(subject_dir: Path) -> list[dict]:
+    """Load all racing trial folders under a subject directory.
+
+    Returns one dict per trial with: name, gates, gate_status, inference,
+    commands, drones, centroid, t0_ms.  Trials missing gate_layout or
+    gate_status are skipped.
+    """
+    trial_dirs = sorted(
+        d for d in subject_dir.iterdir()
+        if d.is_dir() and d.name.startswith("trial_")
+    )
+    trials: list[dict] = []
+    for trial_dir in trial_dirs:
+        gates = _load_csv(trial_dir, GATE_LAYOUT_FILE)
+        gate_status = _load_csv(trial_dir, GATE_STATUS_FILE)
+        if gates is None or gate_status is None:
+            continue
+        inference = _load_csv(trial_dir, INFERENCE_FILE_NAME)
+        commands = _load_csv(trial_dir, COMMAND_DATA_FILE)
+        drones = _load_csv(trial_dir, DRONE_FILE_NAME)
+        centroid = _compute_centroid(drones) if drones is not None else None
+        t0_ms = _find_t0(inference, centroid, commands, gate_status)
+        trials.append({
+            "name": trial_dir.name,
+            "gates": gates,
+            "gate_status": gate_status,
+            "inference": inference,
+            "commands": commands,
+            "drones": drones,
+            "centroid": centroid,
+            "t0_ms": t0_ms,
+        })
+    return trials
+
+
+def _segment_metadata(
+    gates: pd.DataFrame,
+) -> tuple[list[int], list[int], list[str], list[bool]]:
+    """Return canonical per-segment (gate_a_id, gate_b_id, name, is_hard).
+
+    Gates are ordered by center_z (course progress).  A segment's difficulty
+    is taken from the destination gate's `is_hard` column when present.
+    Names use a per-difficulty counter, e.g. "Easy 1", "Hard 1", "Easy 2", ...
+    """
+    sorted_gates = gates.sort_values("center_z").reset_index(drop=True)
+    has_diff = DIFFICULTY_COL in sorted_gates.columns
+
+    a_ids: list[int] = []
+    b_ids: list[int] = []
+    names: list[str] = []
+    diffs: list[bool] = []
+    easy_n = 0
+    hard_n = 0
+    for i in range(len(sorted_gates) - 1):
+        a_ids.append(int(sorted_gates.iloc[i]["id"]))
+        b_ids.append(int(sorted_gates.iloc[i + 1]["id"]))
+        hard = bool(sorted_gates.iloc[i + 1][DIFFICULTY_COL]) if has_diff else False
+        diffs.append(hard)
+        if hard:
+            hard_n += 1
+            names.append(f"Hard {hard_n}")
+        else:
+            easy_n += 1
+            names.append(f"Easy {easy_n}")
+    return a_ids, b_ids, names, diffs
+
+
+def _plot_subject_completion_times(ax, trials):
+    """Horizontal stacked bars per trial, segments split at gates.
+
+    Easy/hard segments use distinct hues (green/red) and alternate between two
+    shades of that hue so adjacent segment boundaries are clearly visible.
+    Per-segment split times are annotated inside each segment when wide enough,
+    and total completion time (mm:ss) is annotated at the right of each bar.
+    """
+    if not trials:
+        _no_data_placeholder(ax, "Trial Completion Times")
+        return
+
+    easy_shades = ["#43A047", "#A5D6A7"]
+    hard_shades = ["#E53935", "#FFCDD2"]
+
+    y_positions = np.arange(len(trials))
+    bar_height = 0.62
+    max_total = 0.0
+    drew_easy = False
+    drew_hard = False
+
+    for yi, tr in zip(y_positions, trials):
+        gates = tr["gates"]
+        passed = _gate_passage_times(tr["gate_status"])
+        if len(passed) < 2 or gates is None:
+            continue
+
+        gates_idx = gates.set_index("id")
+        ts = passed["first_pass_timestamp"].values / 1000.0
+        ids = passed["id"].values
+        ts0 = ts[0]
+
+        easy_alt = 0
+        hard_alt = 0
+        for i in range(1, len(ts)):
+            seg_start = ts[i - 1] - ts0
+            seg_dur = ts[i] - ts[i - 1]
+            if seg_dur <= 0:
+                continue
+
+            dest_id = int(ids[i])
+            hard = (
+                bool(gates_idx.loc[dest_id, DIFFICULTY_COL])
+                if (
+                    DIFFICULTY_COL in gates_idx.columns
+                    and dest_id in gates_idx.index
+                )
+                else False
+            )
+            if hard:
+                color = hard_shades[hard_alt % 2]
+                hard_alt += 1
+                drew_hard = True
+            else:
+                color = easy_shades[easy_alt % 2]
+                easy_alt += 1
+                drew_easy = True
+
+            ax.barh(
+                yi, seg_dur, left=seg_start, height=bar_height,
+                color=color, edgecolor="white", linewidth=1.2, zorder=2,
+            )
+
+            if seg_dur >= 1.5:
+                ax.text(
+                    seg_start + seg_dur / 2, yi,
+                    f"{seg_dur:.1f}s",
+                    ha="center", va="center",
+                    fontsize=7, color="white", fontweight="bold", zorder=3,
+                )
+
+        total = ts[-1] - ts0
+        max_total = max(max_total, total)
+        mm = int(total // 60)
+        ss = total % 60
+        ax.text(
+            total + 0.5, yi,
+            f"{mm}m {ss:.1f}s",
+            ha="left", va="center",
+            fontsize=9, fontweight="bold", color="#212121",
+        )
+
+    if max_total <= 0:
+        _no_data_placeholder(ax, "Trial Completion Times")
+        return
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([tr["name"] for tr in trials], fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlabel("Time (s)")
+    ax.set_xlim(0, max_total * 1.18)
+    ax.set_title(
+        "Trial Completion Times — gate splits stacked, hue = difficulty"
+    )
+    ax.grid(axis="x", linestyle=":", alpha=0.4)
+
+    from matplotlib.patches import Patch
+    handles = []
+    if drew_easy:
+        handles.append(Patch(facecolor=easy_shades[0], edgecolor="white", label="Easy segment"))
+    if drew_hard:
+        handles.append(Patch(facecolor=hard_shades[0], edgecolor="white", label="Hard segment"))
+    if handles:
+        ax.legend(handles=handles, loc="lower right", fontsize=8)
+
+
+def _plot_subject_segment_cwl(ax, trials):
+    """Per-segment CWL stripes — y groups course segments, sub-rows per trial.
+
+    Each course segment (between consecutive gates ordered by center_z) becomes
+    a horizontal band on the y-axis.  Within each band, each trial gets its own
+    horizontal stripe colored by `filtered_state` (Low / Medium / High).  The
+    CWL signal is time-normalized within the segment so all trials are
+    horizontally aligned regardless of completion speed.
+
+    Difficulty is shown as a soft background band (green = easy, red = hard).
+    """
+    if not trials:
+        _no_data_placeholder(ax, "Segment CWL Projection")
+        return
+
+    gates = trials[0]["gates"]
+    if gates is None or len(gates) < 2:
+        _no_data_placeholder(ax, "Segment CWL Projection")
+        return
+
+    a_ids, b_ids, seg_names, seg_diffs = _segment_metadata(gates)
+    n_segments = len(a_ids)
+    if n_segments == 0:
+        _no_data_placeholder(ax, "Segment CWL Projection")
+        return
+
+    n_trials = len(trials)
+    seg_block = 1.0
+    seg_gap = 0.3
+    seg_pitch = seg_block + seg_gap
+    line_pitch = seg_block / (n_trials + 1)
+
+    from matplotlib.collections import LineCollection as _LC
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    y_centers: list[float] = []
+    drew_any = False
+    for s_idx in range(n_segments):
+        seg_top = s_idx * seg_pitch
+        y_centers.append(seg_top + seg_block / 2)
+
+        bg_color = "#FFEBEE" if seg_diffs[s_idx] else "#E8F5E9"
+        ax.axhspan(seg_top, seg_top + seg_block, color=bg_color, alpha=0.55, zorder=0)
+
+        ga, gb = a_ids[s_idx], b_ids[s_idx]
+        for t_idx, tr in enumerate(trials):
+            inf = tr["inference"]
+            gs = tr["gate_status"]
+            if inf is None or gs is None:
+                continue
+
+            try:
+                gs_idx = gs.set_index("id")
+                t_start = float(gs_idx.loc[ga, "first_pass_timestamp"])
+                t_end = float(gs_idx.loc[gb, "first_pass_timestamp"])
+            except KeyError:
+                continue
+            if t_start <= 0 or t_end <= 0 or t_end <= t_start:
+                continue
+
+            mask = (inf["timestamp"] >= t_start) & (inf["timestamp"] <= t_end)
+            inf_seg = inf.loc[mask].sort_values("timestamp")
+            if len(inf_seg) < 2:
+                continue
+
+            x_norm = (inf_seg["timestamp"].values - t_start) / (t_end - t_start)
+            cwl = inf_seg["filtered_state"].fillna(0).values.astype(int)
+
+            y_line = seg_top + (t_idx + 1) * line_pitch
+            points = np.column_stack([x_norm, np.full_like(x_norm, y_line)])
+            segs = np.stack([points[:-1], points[1:]], axis=1)
+            colors = [STATE_COLORS.get(int(c), "#999") for c in cwl[:-1]]
+            ax.add_collection(
+                _LC(segs, colors=colors, linewidths=8, capstyle="butt", zorder=3)
+            )
+            drew_any = True
+
+            if s_idx == 0:
+                ax.text(
+                    -0.015, y_line, tr["name"].replace("trial_", "T"),
+                    ha="right", va="center", fontsize=8, color="#444",
+                )
+
+    if not drew_any:
+        _no_data_placeholder(ax, "Segment CWL Projection")
+        return
+
+    ax.set_yticks(y_centers)
+    ax.set_yticklabels(seg_names, fontsize=10, fontweight="bold")
+    ax.set_xlim(-0.06, 1.02)
+    ax.set_ylim(n_segments * seg_pitch - seg_gap, -0.05)
+    ax.set_xlabel("Normalized segment progress  (0 = entry → 1 = exit)")
+    ax.set_title(
+        "CWL Profile per Course Segment — one stripe per trial, time-normalized"
+    )
+    ax.grid(axis="x", linestyle=":", alpha=0.3)
+
+    handles = [
+        Line2D([0], [0], color=STATE_COLORS[i], linewidth=6, label=f"CWL {STATE_LABELS[i]}")
+        for i in range(3)
+    ]
+    handles += [
+        Patch(facecolor="#E8F5E9", edgecolor="none", label="Easy bg"),
+        Patch(facecolor="#FFEBEE", edgecolor="none", label="Hard bg"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=8, ncol=5)
+
+
+def _run_racing_subject(show: bool, output_dir: Path, data_dir: Path):
+    trials = _load_racing_trials(data_dir)
+    if not trials:
+        print("  No trial folders with gate_layout + gate_status found.")
+        return
+    print(f"  Loaded {len(trials)} trial(s)")
+
+    figs: list[tuple[plt.Figure, Path]] = []
+    subject = data_dir.name
+
+    fig1_h = max(3.5, 0.9 + 0.7 * len(trials))
+    fig1, ax1 = plt.subplots(figsize=(15, fig1_h))
+    fig1.suptitle(
+        f"Racing — {subject} — Trial Completion Times",
+        fontsize=13, fontweight="bold",
+    )
+    _plot_subject_completion_times(ax1, trials)
+    fig1.tight_layout()
+    figs.append((fig1, output_dir / f"racing_subject_{subject}_completion_times.png"))
+
+    # Height grows with both segments and trials
+    n_segs_est = max(1, len(trials[0]["gates"]) - 1) if trials[0]["gates"] is not None else 5
+    fig2_h = max(6.5, 0.7 * n_segs_est + 0.25 * n_segs_est * len(trials))
+    fig2, ax2 = plt.subplots(figsize=(15, min(fig2_h, 14)))
+    fig2.suptitle(
+        f"Racing — {subject} — Segment CWL Profile",
+        fontsize=13, fontweight="bold",
+    )
+    _plot_subject_segment_cwl(ax2, trials)
+    fig2.tight_layout()
+    figs.append((fig2, output_dir / f"racing_subject_{subject}_segment_cwl.png"))
+
+    _save_or_show(figs, show)
+
+
+# ── Per-experiment racing analysis ───────────────────────────────────────────
+
+
+def _classify_subject_adaptation(trials: list[dict]) -> str:
+    """Heuristic group classifier: 'adaptive' / 'non_adaptive' / 'unknown'.
+
+    A subject is 'adaptive' if cwl_current_step varies across any of their
+    trials — i.e. the system actually moved between flight profiles.
+    A constant step across all trials means the profile was pinned (control
+    group). Subjects with no command data fall back to 'unknown'.
+    """
+    saw_data = False
+    for tr in trials:
+        commands = tr["commands"]
+        if commands is None or "cwl_current_step" not in commands.columns:
+            continue
+        steps = commands["cwl_current_step"].dropna()
+        if steps.empty:
+            continue
+        saw_data = True
+        if steps.nunique() > 1:
+            return "adaptive"
+    return "non_adaptive" if saw_data else "unknown"
+
+
+def _trial_metrics(tr: dict) -> dict | None:
+    """Compute summary metrics for one trial.
+
+    completion_s   — first → last gate in seconds.
+    min_alive      — minimum centroid n_alive over the trial.
+    final_alive    — n_alive at the last centroid sample.
+    dead_drones    — SWARM_SIZE − final_alive.
+    missed_drones  — Σ over reached gates of (alive − inside) at gate time.
+                     Counts every "alive drone outside the gate" event, so
+                     a chronic straggler is penalised at every gate it skips.
+    penalty_s      — completion + dead·DEAD_PENALTY + miss·MISS_PENALTY.
+    """
+    gates = tr["gates"]
+    gs = tr["gate_status"]
+    drones = tr["drones"]
+    centroid = tr["centroid"]
+    if gates is None or gs is None:
+        return None
+
+    passed = _gate_passage_times(gs)
+    if len(passed) < 2:
+        return None
+
+    completion_s = (
+        passed["first_pass_timestamp"].max()
+        - passed["first_pass_timestamp"].min()
+    ) / 1000.0
+
+    breakdown = _compute_gate_breakdown(gates, gs, drones)
+    missed_drones = sum(
+        b.get("outside", 0) for b in breakdown.values() if b.get("reached")
+    )
+
+    if centroid is not None and "n_alive" in centroid.columns:
+        min_alive = int(centroid["n_alive"].min())
+        final_alive = int(centroid["n_alive"].iloc[-1])
+    else:
+        min_alive = SWARM_SIZE
+        final_alive = SWARM_SIZE
+    dead_drones = SWARM_SIZE - final_alive
+
+    gates_reached = (
+        int((gs["pass_count"] > 0).sum())
+        if "pass_count" in gs.columns
+        else len(passed)
+    )
+
+    penalty_s = (
+        completion_s
+        + dead_drones * RACING_DEAD_PENALTY_S
+        + missed_drones * RACING_MISS_PENALTY_S
+    )
+
+    return {
+        "completion_s": completion_s,
+        "min_alive": min_alive,
+        "final_alive": final_alive,
+        "dead_drones": dead_drones,
+        "missed_drones": missed_drones,
+        "gates_reached": gates_reached,
+        "gates_total": len(gates),
+        "penalty_s": penalty_s,
+    }
+
+
+def _load_experiment_racing(experiment_dir: Path) -> dict[str, list[dict]]:
+    """Load racing trials for every 4-char subject folder under experiment_dir."""
+    by_subject: dict[str, list[dict]] = {}
+    for subj_dir in sorted(experiment_dir.iterdir()):
+        if not subj_dir.is_dir() or not _SUBJECT_RE.match(subj_dir.name):
+            continue
+        trials = _load_racing_trials(subj_dir)
+        if trials:
+            by_subject[subj_dir.name] = trials
+    return by_subject
+
+
+def _build_experiment_metrics(
+    by_subject: dict[str, list[dict]],
+    groups: dict[str, str],
+) -> pd.DataFrame:
+    """Long DataFrame: one row per (subject, trial) with metrics + group."""
+    rows = []
+    for sid, trials in by_subject.items():
+        group = groups.get(sid, "unknown")
+        for tr in trials:
+            m = _trial_metrics(tr)
+            if m is None:
+                continue
+            rows.append({
+                "subject_id": sid,
+                "trial": tr["name"],
+                "group": group,
+                **m,
+            })
+    return pd.DataFrame(rows)
+
+
+def _grouped_boxplot(
+    ax,
+    df: pd.DataFrame,
+    value_col: str,
+    ylabel: str,
+    title: str,
+    better_low: bool,
+):
+    """Per-subject boxes coloured by adaptation group, with per-trial dots.
+
+    Subjects are ordered: adaptive → non_adaptive → unknown, alphabetical
+    within group. A dashed horizontal line marks each group's mean across
+    its trials and is annotated with μ. A vertical dotted line separates
+    groups for readability.
+    """
+    if df.empty or value_col not in df.columns:
+        _no_data_placeholder(ax, title)
+        return
+
+    groups_order = ["adaptive", "non_adaptive", "unknown"]
+    box_data: list[np.ndarray] = []
+    box_colors: list[str] = []
+    box_labels: list[str] = []
+    box_groups: list[str] = []
+
+    for g in groups_order:
+        sids = sorted(df[df["group"] == g]["subject_id"].unique())
+        for sid in sids:
+            vals = df[df["subject_id"] == sid][value_col].dropna().values
+            if len(vals) == 0:
+                continue
+            box_data.append(vals)
+            box_colors.append(GROUP_COLORS[g])
+            box_labels.append(sid)
+            box_groups.append(g)
+
+    if not box_data:
+        _no_data_placeholder(ax, title)
+        return
+
+    positions = np.arange(1, len(box_data) + 1)
+    bp = ax.boxplot(
+        box_data,
+        positions=positions,
+        widths=0.55,
+        patch_artist=True,
+        medianprops={"color": "black", "linewidth": 1.6},
+        flierprops={"marker": ".", "markersize": 4, "alpha": 0.5},
+    )
+    import matplotlib.colors as _mcolors
+    for patch, c in zip(bp["boxes"], box_colors, strict=True):
+        rgba = (*_mcolors.to_rgb(c), 0.55)
+        patch.set_facecolor(rgba)
+        patch.set_edgecolor(c)
+        patch.set_linewidth(1.2)
+
+    rng = np.random.RandomState(42)
+    for pos, data, c in zip(positions, box_data, box_colors, strict=True):
+        jitter = (rng.rand(len(data)) - 0.5) * 0.28
+        ax.scatter(
+            pos + jitter, data, color=c, alpha=0.85, s=20,
+            edgecolors="white", linewidths=0.5, zorder=4,
+        )
+
+    # Group means + group separators
+    last_g = None
+    for i, (pos, g) in enumerate(zip(positions, box_groups)):
+        if last_g is not None and g != last_g:
+            ax.axvline(pos - 0.5, color="gray", linewidth=0.7, linestyle=":", alpha=0.6)
+        last_g = g
+
+    for g in groups_order:
+        gdata = df[df["group"] == g][value_col].dropna().values
+        if len(gdata) == 0:
+            continue
+        gxs = [pos for pos, gg in zip(positions, box_groups) if gg == g]
+        if not gxs:
+            continue
+        gmean = float(np.mean(gdata))
+        x0, x1 = min(gxs) - 0.45, max(gxs) + 0.45
+        ax.hlines(gmean, x0, x1, colors=GROUP_COLORS[g], linestyles="--",
+                  linewidth=1.6, alpha=0.95, zorder=2)
+        ax.text(
+            (x0 + x1) / 2, gmean,
+            f" {GROUP_LABELS[g].split()[0]} μ={gmean:.2f} ",
+            ha="center", va="bottom", fontsize=8, color=GROUP_COLORS[g],
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
+                      edgecolor=GROUP_COLORS[g], linewidth=0.7, alpha=0.85),
+        )
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(box_labels, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10, fontweight="bold")
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+
+    indicator = "↓ better" if better_low else "↑ better"
+    ax.text(
+        0.01, 0.97, indicator, transform=ax.transAxes,
+        fontsize=8, va="top", ha="left", color="#444",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                  edgecolor="#ccc", linewidth=0.6, alpha=0.85),
+    )
+
+
+def _plot_experiment_summary_boxplots(axes, df: pd.DataFrame):
+    """4-panel grid: completion, min alive, missed, penalty."""
+    panels = [
+        ("completion_s", "Completion time (s)",
+         "Trial Completion Time", True),
+        ("min_alive", f"Min drones alive (/{SWARM_SIZE})",
+         "Min Drones Alive per Trial", False),
+        ("missed_drones", "Σ drones outside gates",
+         "Drone-Gate Misses per Trial", True),
+        ("penalty_s", "Penalty score (s-equivalent)",
+         f"Composite Penalty\n(time + {RACING_DEAD_PENALTY_S:.0f}s/dead "
+         f"+ {RACING_MISS_PENALTY_S:.0f}s/miss)", True),
+    ]
+    flat = np.asarray(axes).ravel()
+    for ax, (col, ylabel, title, low_better) in zip(flat, panels):
+        _grouped_boxplot(ax, df, col, ylabel, title, better_low=low_better)
+
+
+def _plot_experiment_cwl_distribution(
+    ax, by_subject: dict[str, list[dict]], groups: dict[str, str],
+):
+    """Stacked horizontal bars: % time in Low/Med/High CWL per subject."""
+    rows = []
+    for sid, trials in by_subject.items():
+        all_states: list[int] = []
+        for tr in trials:
+            inf = tr["inference"]
+            if inf is None or "filtered_state" not in inf.columns:
+                continue
+            all_states.extend(inf["filtered_state"].dropna().astype(int).tolist())
+        if not all_states:
+            continue
+        s = np.array(all_states)
+        total = len(s)
+        rows.append({
+            "subject_id": sid,
+            "group": groups.get(sid, "unknown"),
+            "low_pct": float((s == 0).sum()) / total,
+            "med_pct": float((s == 1).sum()) / total,
+            "high_pct": float((s == 2).sum()) / total,
+        })
+
+    if not rows:
+        _no_data_placeholder(ax, "CWL Distribution")
+        return
+
+    df = pd.DataFrame(rows)
+    order = {"adaptive": 0, "non_adaptive": 1, "unknown": 2}
+    df["g_ord"] = df["group"].map(order).fillna(3)
+    df = df.sort_values(["g_ord", "subject_id"]).reset_index(drop=True)
+
+    y = np.arange(len(df))
+    ax.barh(y, df["low_pct"], color=STATE_COLORS[0], label=STATE_LABELS[0],
+            edgecolor="white", linewidth=0.6)
+    ax.barh(y, df["med_pct"], left=df["low_pct"], color=STATE_COLORS[1],
+            label=STATE_LABELS[1], edgecolor="white", linewidth=0.6)
+    ax.barh(y, df["high_pct"], left=df["low_pct"] + df["med_pct"],
+            color=STATE_COLORS[2], label=STATE_LABELS[2],
+            edgecolor="white", linewidth=0.6)
+
+    labels = [
+        f"{r.subject_id} [{GROUP_LABELS[r.group].split()[0]}]"
+        for r in df.itertuples()
+    ]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1)
+    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+    ax.set_xlabel("Time fraction in CWL state")
+    ax.set_title("CWL Distribution per Subject", fontsize=10, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=8, ncol=3)
+
+
+def _plot_experiment_adaptation_steps(
+    ax, by_subject: dict[str, list[dict]], groups: dict[str, str],
+):
+    """Box plot of cwl_current_step per adaptive subject + grand mean line.
+
+    Skipped for non_adaptive subjects since their step is constant by
+    construction. The grand mean across all adaptive trials is a useful
+    reference for picking constant-step values for new control subjects.
+    """
+    rows = []
+    for sid, trials in by_subject.items():
+        if groups.get(sid) != "adaptive":
+            continue
+        steps: list[float] = []
+        for tr in trials:
+            commands = tr["commands"]
+            if commands is None or "cwl_current_step" not in commands.columns:
+                continue
+            steps.extend(commands["cwl_current_step"].dropna().tolist())
+        if steps:
+            rows.append({"subject_id": sid, "steps": np.array(steps)})
+
+    if not rows:
+        _no_data_placeholder(ax, "Adaptation Step Distribution")
+        return
+
+    rows.sort(key=lambda r: r["subject_id"])
+    box_data = [r["steps"] for r in rows]
+    positions = np.arange(1, len(rows) + 1)
+
+    bp = ax.boxplot(
+        box_data, positions=positions, widths=0.55,
+        patch_artist=True,
+        medianprops={"color": "black", "linewidth": 1.6},
+        flierprops={"marker": ".", "markersize": 3, "alpha": 0.4},
+    )
+    import matplotlib.colors as _mcolors
+    color = GROUP_COLORS["adaptive"]
+    rgba = (*_mcolors.to_rgb(color), 0.55)
+    for patch in bp["boxes"]:
+        patch.set_facecolor(rgba)
+        patch.set_edgecolor(color)
+        patch.set_linewidth(1.2)
+
+    grand_mean = float(np.concatenate(box_data).mean())
+    ax.axhline(
+        grand_mean, color="black", linewidth=1.2, linestyle="--",
+        label=f"Adaptive grand μ = {grand_mean:.1f}",
+    )
+
+    # Indicate the experiment's max step from the first adaptive trial we find
+    max_step = None
+    for sid, trials in by_subject.items():
+        if groups.get(sid) != "adaptive":
+            continue
+        for tr in trials:
+            commands = tr["commands"]
+            if commands is None or "cwl_total_steps" not in commands.columns:
+                continue
+            tot = commands["cwl_total_steps"].dropna()
+            if not tot.empty:
+                max_step = int(tot.iloc[0]) - 1
+                break
+        if max_step is not None:
+            break
+    if max_step is not None:
+        ax.axhline(
+            max_step, color="#888", linewidth=0.8, linestyle=":",
+            label=f"Max step ({max_step})",
+        )
+        ax.axhline(
+            0, color="#888", linewidth=0.8, linestyle=":", label="Min step (0)",
+        )
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [r["subject_id"] for r in rows], rotation=30, ha="right", fontsize=8,
+    )
+    ax.set_ylabel("CWL current step")
+    ax.set_title(
+        "Adaptation Step Distribution per Subject (adaptive group)",
+        fontsize=10, fontweight="bold",
+    )
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+    ax.legend(loc="lower right", fontsize=8)
+
+
+def _print_experiment_group_summary(df: pd.DataFrame):
+    print("\n" + "=" * 70)
+    print("GROUP SUMMARY — mean ± std across all trials")
+    print("=" * 70)
+    cols = [
+        ("completion_s", "Completion time (s)", "{:>7.1f}"),
+        ("min_alive",    f"Min alive (/{SWARM_SIZE})", "{:>7.2f}"),
+        ("missed_drones", "Drone-gate misses",  "{:>7.2f}"),
+        ("dead_drones",  f"Dead (/{SWARM_SIZE})", "{:>7.2f}"),
+        ("penalty_s",    "Penalty (s)",         "{:>7.1f}"),
+    ]
+    for group in ["adaptive", "non_adaptive", "unknown"]:
+        sub = df[df["group"] == group]
+        if sub.empty:
+            continue
+        n_subj = sub["subject_id"].nunique()
+        print(
+            f"\n  {GROUP_LABELS[group]}  "
+            f"(n={len(sub)} trials, {n_subj} subject(s))"
+        )
+        for col, label, fmt in cols:
+            mu = sub[col].mean()
+            sd = sub[col].std()
+            print(f"    {label:<22}  {fmt.format(mu)}  ± {fmt.format(sd).strip()}")
+
+
+def _run_racing_experiment(show: bool, output_dir: Path, data_dir: Path):
+    by_subject = _load_experiment_racing(data_dir)
+    if not by_subject:
+        print("  No subject folders with racing trials found.")
+        return
+
+    groups = {
+        sid: _classify_subject_adaptation(trials)
+        for sid, trials in by_subject.items()
+    }
+    n_total_trials = sum(len(t) for t in by_subject.values())
+    print(f"  Loaded {len(by_subject)} subject(s), {n_total_trials} trial(s)")
+    print("\n  Group classification (auto-detected from cwl_current_step variance):")
+    for sid in sorted(by_subject):
+        print(f"    {sid}  →  {GROUP_LABELS[groups[sid]]}")
+
+    df = _build_experiment_metrics(by_subject, groups)
+    if df.empty:
+        print("  No trial metrics could be computed.")
+        return
+
+    _print_experiment_group_summary(df)
+
+    figs: list[tuple[plt.Figure, Path]] = []
+
+    # Figure 1: 4-panel performance box plots
+    fig1, axes = plt.subplots(2, 2, figsize=(16, 11))
+    fig1.suptitle(
+        f"Racing Experiment — Performance Summary "
+        f"({df['subject_id'].nunique()} subjects, {len(df)} trials)",
+        fontsize=14, fontweight="bold",
+    )
+    _plot_experiment_summary_boxplots(axes, df)
+    fig1.tight_layout()
+    figs.append((fig1, output_dir / "racing_experiment_performance.png"))
+
+    # Figure 2: CWL & adaptation profile
+    fig2_h = max(5.5, 0.45 * len(by_subject) + 2.5)
+    fig2, (ax_cwl, ax_step) = plt.subplots(
+        1, 2, figsize=(16, min(fig2_h, 10)),
+        gridspec_kw={"width_ratios": [1, 1.2]},
+    )
+    fig2.suptitle(
+        "Racing Experiment — CWL & Adaptation Profile",
+        fontsize=14, fontweight="bold",
+    )
+    _plot_experiment_cwl_distribution(ax_cwl, by_subject, groups)
+    _plot_experiment_adaptation_steps(ax_step, by_subject, groups)
+    fig2.tight_layout()
+    figs.append((fig2, output_dir / "racing_experiment_cwl_adaptation.png"))
 
     _save_or_show(figs, show)
 
